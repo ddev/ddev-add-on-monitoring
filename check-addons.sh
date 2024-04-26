@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # This bash4+ script (doesn't work on macOS)
 # Queries GitHub repositories that have the `ddev-get` topic
@@ -12,13 +12,18 @@ org=${ORG:-all}
 topic="ddev-get" # Topic to filter repositories
 if [ "${org}" = "all" ]; then org=""; fi
 
+# Use brew coreutils gdate if it exists, otherwise things fail with macOS date
+# brew install coreutils
+export DATE=date
+if command -v gdate >/dev/null; then DATE=gdate; fi
+
 # Fetch all repositories with the specified topic
 fetch_repos_with_topic() {
   page=1
   while :; do
     query="topic:$topic"
     # if the org has been specified add it to the query, otherwise do all
-    if [ "${org}" != "all" ]; then query="${query}+org:$org"; fi
+    if [ "${org}" != "" ]; then query="${query}+org:$org"; fi
     repos=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
       -H "Accept: application/vnd.github.v3+json" \
       "https://api.github.com/search/repositories?q=${query}&per_page=100&page=$page" | jq -r '.items[].full_name')
@@ -34,7 +39,7 @@ fetch_repos_with_topic() {
 
 # Check the most recent scheduled workflow run
 check_recent_scheduled_run() {
-  local current_date=$(date +%s)  # Current date in seconds since the Unix epoch
+  local current_date=$(${DATE} +%s)  # Current date in seconds since the Unix epoch
   local one_week_ago=$(($current_date - 604800))  # One week ago in seconds since the Unix epoch
 
   mapfile -t repos < <(fetch_repos_with_topic)
@@ -53,7 +58,7 @@ check_recent_scheduled_run() {
     timestamp=$(echo $response | jq -r '.workflow_runs[0].updated_at')
 
     local run_date=$(echo "$response" | jq -r '.workflow_runs[0].updated_at')
-    local run_date_seconds=$(date -d "$run_date" +%s)  # Convert run date to seconds since the Unix epoch
+    local run_date_seconds=$(${DATE} -d "$run_date" +%s)  # Convert run date to seconds since the Unix epoch
 
     # Check if the run date is within the last week
     if [[ "${run_date_seconds}" -le "$one_week_ago" ]]; then
