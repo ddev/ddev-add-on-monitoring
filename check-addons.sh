@@ -11,6 +11,7 @@ set -eu -o pipefail
 org=${ORG:-all}
 topic="ddev-get" # Topic to filter repositories
 if [ "${org}" = "all" ]; then org=""; fi
+EXIT_CODE=0
 
 # Use brew coreutils gdate if it exists, otherwise things fail with macOS date
 # brew install coreutils
@@ -49,7 +50,8 @@ check_recent_scheduled_run() {
 
     # Check if any runs are returned
     if [ "$(echo "$response" | jq -r '.workflow_runs | length')" -eq 0 ]; then
-      echo "No scheduled runs found for $repo"
+      echo "ERROR: No scheduled runs found for $repo"
+      EXIT_CODE=3
       continue # Skip to the next repository
     fi
 
@@ -63,6 +65,7 @@ check_recent_scheduled_run() {
     # Check if the run date is within the last week
     if [[ "${run_date_seconds}" -le "$one_week_ago" ]]; then
         echo "ERROR: The most recent scheduled run for $repo was not within the last week."
+        EXIT_CODE=2
     fi
 
 
@@ -71,8 +74,10 @@ check_recent_scheduled_run() {
       # Get URL of the failed run
       run_url=$(echo "$response" | jq -r '.workflow_runs[0].html_url')
       echo "ERROR: Scheduled test failed in $repo at $run_url ($timestamp)"
+      EXIT_CODE=1
     fi
   done
 }
 
 check_recent_scheduled_run
+exit ${EXIT_CODE}
