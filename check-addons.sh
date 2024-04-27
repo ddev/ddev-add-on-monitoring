@@ -4,14 +4,39 @@
 # Queries GitHub repositories that have the `ddev-get` topic
 # And looks at their tests to see if they are recent
 # Depending on whether `$ORG` is set to an org it will limit to that org
-# If ORG = "all", it will look everywhere
+# If --org = "all", it will look everywhere
 
 set -eu -o pipefail
 
-org=${ORG:-all}
 topic="ddev-get" # Topic to filter repositories
-if [ "${org}" = "all" ]; then org=""; fi
+
 EXIT_CODE=0
+
+# Initialize variables
+GITHUB_TOKEN=""
+org=""
+
+# Loop through arguments and process them
+for arg in "$@"
+do
+    case $arg in
+        --github-token=*)
+        GITHUB_TOKEN="${arg#*=}"
+        shift # Remove processed argument
+        ;;
+        --org=*)
+        org="${arg#*=}"
+        shift # Remove processed argument
+        ;;
+        *)
+        # Skip unknown options
+        ;;
+    esac
+done
+
+
+if [ "${GITHUB_TOKEN}" = "" ]; then echo "--github-token must be set"; exit 5; fi
+echo "Organization: $org"
 
 # Use brew coreutils gdate if it exists, otherwise things fail with macOS date
 # brew install coreutils
