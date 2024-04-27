@@ -5,6 +5,7 @@
 # And looks at their tests to see if they are recent
 # Depending on whether `$ORG` is set to an org it will limit to that org
 # If --org = "all", it will look everywhere
+# `./check-addons.sh --github-token=<token> --org=ddev
 
 set -eu -o pipefail
 
