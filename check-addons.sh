@@ -67,7 +67,7 @@ fetch_repos_with_topic() {
 # Check the most recent scheduled workflow run
 check_recent_scheduled_run() {
   local current_date=$(${DATE} +%s)  # Current date in seconds since the Unix epoch
-  local one_week_ago=$(($current_date - 604800))  # One week ago in seconds since the Unix epoch
+  local one_day_ago=$(($current_date - 86400))  # One day ago in seconds since the Unix epoch
 
   mapfile -t repos < <(fetch_repos_with_topic)
   for repo in "${repos[@]}"; do
@@ -88,9 +88,9 @@ check_recent_scheduled_run() {
     local run_date=$(echo "$response" | jq -r '.workflow_runs[0].updated_at')
     local run_date_seconds=$(${DATE} -d "$run_date" +%s)  # Convert run date to seconds since the Unix epoch
 
-    # Check if the run date is within the last week
-    if [[ "${run_date_seconds}" -le "$one_week_ago" ]]; then
-        echo "ERROR: The most recent scheduled run for $repo was not within the last week."
+    # Check if the run date is within the last day
+    if [[ "${run_date_seconds}" -le "$one_day_ago" ]]; then
+        echo "ERROR: The most recent scheduled run for $repo was not within the last day."
         EXIT_CODE=2
     fi
 
