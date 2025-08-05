@@ -27,6 +27,7 @@ EXIT_CODE=0
 # Initialize variables
 GITHUB_TOKEN=""
 org=""
+additional_github_repos=""
 
 # Loop through arguments and process them
 for arg in "$@"
@@ -40,6 +41,10 @@ do
         org="${arg#*=}"
         shift # Remove processed argument
         ;;
+        --additional-github-repos=*)
+        additional_github_repos="${arg#*=}"
+        shift # Remove processed argument
+        ;;
         *)
         # Skip unknown options
         ;;
@@ -49,7 +54,6 @@ done
 
 if [ "${GITHUB_TOKEN}" = "" ]; then echo "--github-token must be set"; exit 5; fi
 echo "Organization: $org"
-echo "Monitoring ${#additional_repos[@]} additional repositories beyond topic-based filtering"
 
 # Use brew coreutils gdate if it exists, otherwise things fail with macOS date
 # brew install coreutils
@@ -87,7 +91,16 @@ check_recent_scheduled_run() {
   while IFS= read -r repo; do
     [[ -n "$repo" ]] && topic_repos+=("$repo")
   done < <(fetch_repos_with_topic)
+  
+  # Start with hardcoded repos, then add CLI-provided repos
   all_repos=("${topic_repos[@]}" "${additional_repos[@]}")
+  
+  # Add CLI-provided repos if available
+  cli_repos=()
+  if [[ -n "$additional_github_repos" ]]; then
+    IFS=',' read -ra cli_repos <<< "$additional_github_repos"
+    all_repos=("${all_repos[@]}" "${cli_repos[@]}")
+  fi
   
   # Remove duplicates using a simpler approach compatible with older bash
   unique_repos=()
@@ -107,7 +120,9 @@ check_recent_scheduled_run() {
     fi
   done
   
-  echo "Checking ${#unique_repos[@]} total repositories (${#topic_repos[@]} from topic '${topic}', ${#additional_repos[@]} additional)"
+  # Calculate total additional repos (hardcoded + CLI)
+  total_additional=$((${#additional_repos[@]} + ${#cli_repos[@]}))
+  echo "Checking ${#unique_repos[@]} total repositories (${#topic_repos[@]} from topic '${topic}', ${total_additional} additional)"
   
   for repo in "${unique_repos[@]}"; do
     # Fetch only the most recent scheduled workflow run
