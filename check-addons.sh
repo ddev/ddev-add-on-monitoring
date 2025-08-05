@@ -5,17 +5,29 @@
 # And looks at their tests to see if they are recent
 # Depending on whether `$ORG` is set to an org it will limit to that org
 # If --org = "all", it will look everywhere
+# Also monitors additional critical DDEV repositories beyond add-ons
 # `./check-addons.sh --github-token=<token> --org=ddev
 
 set -eu -o pipefail
 
 topic="ddev-get" # Topic to filter repositories
 
+# Additional repositories to monitor beyond topic-based filtering
+# These are critical DDEV infrastructure repositories with scheduled tests
+additional_repos=(
+    "ddev/ddev"
+    "ddev/github-action-add-on-test"
+    "ddev/github-action-setup-ddev"
+    "ddev/signing_tools"
+    "ddev/sponsorship-data"
+)
+
 EXIT_CODE=0
 
 # Initialize variables
 GITHUB_TOKEN=""
 org=""
+additional_github_repos=""
 
 # Loop through arguments and process them
 for arg in "$@"
@@ -27,6 +39,10 @@ do
         ;;
         --org=*)
         org="${arg#*=}"
+        shift # Remove processed argument
+        ;;
+        --additional-github-repos=*)
+        additional_github_repos="${arg#*=}"
         shift # Remove processed argument
         ;;
         *)
@@ -69,8 +85,46 @@ check_recent_scheduled_run() {
   local current_date=$(${DATE} +%s)  # Current date in seconds since the Unix epoch
   local one_day_ago=$(($current_date - 86400))  # One day ago in seconds since the Unix epoch
 
-  mapfile -t repos < <(fetch_repos_with_topic)
-  for repo in "${repos[@]}"; do
+  # Combine topic-based repos with additional repos and deduplicate
+  # Use a more compatible approach for older bash versions
+  topic_repos=()
+  while IFS= read -r repo; do
+    [[ -n "$repo" ]] && topic_repos+=("$repo")
+  done < <(fetch_repos_with_topic)
+  
+  # Start with hardcoded repos, then add CLI-provided repos
+  all_repos=("${topic_repos[@]}" "${additional_repos[@]}")
+  
+  # Add CLI-provided repos if available
+  cli_repos=()
+  if [[ -n "$additional_github_repos" ]]; then
+    IFS=',' read -ra cli_repos <<< "$additional_github_repos"
+    all_repos=("${all_repos[@]}" "${cli_repos[@]}")
+  fi
+  
+  # Remove duplicates using a simpler approach compatible with older bash
+  unique_repos=()
+  for repo in "${all_repos[@]}"; do
+    # Check if repo is already in unique_repos array
+    duplicate=false
+    if [[ ${#unique_repos[@]} -gt 0 ]]; then
+      for existing in "${unique_repos[@]}"; do
+        if [[ "$repo" == "$existing" ]]; then
+          duplicate=true
+          break
+        fi
+      done
+    fi
+    if [[ "$duplicate" == false ]]; then
+      unique_repos+=("$repo")
+    fi
+  done
+  
+  # Calculate total additional repos (hardcoded + CLI)
+  total_additional=$((${#additional_repos[@]} + ${#cli_repos[@]}))
+  echo "Checking ${#unique_repos[@]} total repositories (${#topic_repos[@]} from topic '${topic}', ${total_additional} additional)"
+  
+  for repo in "${unique_repos[@]}"; do
     # Fetch only the most recent scheduled workflow run
     response=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/$repo/actions/runs?event=schedule&per_page=1")
 
