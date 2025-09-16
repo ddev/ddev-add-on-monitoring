@@ -167,19 +167,29 @@ gh_issue_close() {
     local comment="$3"
     
     if [[ "$DRY_RUN" == "true" ]]; then
-        echo "[DRY-RUN] Would close issue $issue_number in $repo"
+        echo "[DRY-RUN] Would add comment, update title to [RESOLVED], and close issue $issue_number in $repo"
         return 0
     fi
     
-    local data
-data=$(jq -n --arg comment "$comment" '{"state": "closed", "body": $comment}')
+    # First add a comment explaining the closure
+    local comment_data
+comment_data=$(jq -n --arg body "$comment" '{"body": $body}')
+    curl -s -H "Authorization: token $GITHUB_TOKEN" \
+         -H "Accept: application/vnd.github.v3+json" \
+         -X POST \
+         -H "Content-Type: application/json" \
+         -d "$comment_data" \
+         "https://api.github.com/repos/$repo/issues/$issue_number/comments" > /dev/null
     
+    # Then close the issue
+    local close_data
+close_data=$(jq -n '{"state": "closed"}')
     curl -s -H "Authorization: token $GITHUB_TOKEN" \
          -H "Accept: application/vnd.github.v3+json" \
          -X PATCH \
          -H "Content-Type: application/json" \
-         -d "$data" \
-         "https://api.github.com/repos/$repo/issues/$issue_number"
+         -d "$close_data" \
+         "https://api.github.com/repos/$repo/issues/$issue_number" > /dev/null
 }
 
 # Fetch all repositories with the specified topic
