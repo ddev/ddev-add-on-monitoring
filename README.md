@@ -93,3 +93,67 @@ Test specific owner's repositories:
 The script identifies repositories that lack test workflows and provides information for manual follow-up:
 - Suggests adding test workflows
 - Recommends removing the `ddev-get` topic if tests won't be added
+
+## Manual Testing
+
+### Environment Variables
+
+The script supports several environment variables for testing and configuration:
+
+- `NOTIFICATION_INTERVAL_DAYS` - Days between notifications (default: 30)
+- `RENOTIFICATION_COOLDOWN_DAYS` - Days to wait after issue closure before re-notifying (default: 60)
+
+### Testing Scenarios
+
+#### Testing with Disabled Workflows
+Use the `ddev-test` organization which contains repositories with disabled workflows:
+
+```bash
+# Dry run to see what would be done
+./notify-addon-owners.sh --github-token=<token> --org=ddev-test --dry-run
+
+# Real run (will create issues if needed)
+./notify-addon-owners.sh --github-token=<token> --org=ddev-test
+```
+
+#### Testing Notification Timing
+To test the notification timing without waiting for the default intervals:
+
+```bash
+# Set notification interval to 0 days for immediate re-notification
+NOTIFICATION_INTERVAL_DAYS=0 ./notify-addon-owners.sh --github-token=<token> --org=ddev-test --dry-run
+
+# Set cooldown period to 0 days to test immediate re-notification after closure
+RENOTIFICATION_COOLDOWN_DAYS=0 ./notify-addon-owners.sh --github-token=<token> --org=ddev-test --dry-run
+```
+
+#### Testing with Specific Repositories
+Test with a specific repository:
+
+```bash
+# Test a single repository
+./notify-addon-owners.sh --github-token=<token> --additional-github-repos="owner/repo" --dry-run
+```
+
+#### Testing Issue Management
+To test issue creation and closing behavior:
+
+1. **First run**: Creates initial notification issue
+2. **Re-enable workflows**: Run again to see issue closing behavior
+3. **Disable workflows again**: Run with `NOTIFICATION_INTERVAL_DAYS=0` to test re-notification
+
+#### Debugging
+Use bash debug mode to troubleshoot issues:
+
+```bash
+bash -x ./notify-addon-owners.sh --github-token=<token> --org=ddev-test --dry-run
+```
+
+### GitHub Token Requirements
+
+The script requires a GitHub personal access token with the following permissions:
+
+- **repo**: Full access to repository information, issues, and workflows
+- **read:org**: Read organization information (when using organization filters)
+
+For creating issues, the token must have write permissions for the target repositories.
