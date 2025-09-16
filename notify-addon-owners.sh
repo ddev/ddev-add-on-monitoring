@@ -96,9 +96,21 @@ gh_api() {
         echo "[DRY-RUN] Would call GitHub API: $endpoint"
         return 0
     fi
-    curl -s -H "Authorization: token $GITHUB_TOKEN" \
+    local response
+    response=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
          -H "Accept: application/vnd.github.v3+json" \
-         "$endpoint"
+         "$endpoint")
+    
+    # Check if response is valid JSON and not an error
+    if echo "$response" | jq -e . >/dev/null 2>&1; then
+        # Check if it's an error response
+        if echo "$response" | jq -e '.message' >/dev/null 2>&1; then
+            echo "API_ERROR: $(echo "$response" | jq -r '.message')"
+            return 1
+        fi
+    fi
+    
+    echo "$response"
 }
 
 gh_issue_create() {
@@ -181,9 +193,21 @@ comment_data=$(jq -n --arg body "$comment" '{"body": $body}')
          -d "$comment_data" \
          "https://api.github.com/repos/$repo/issues/$issue_number/comments" > /dev/null
     
-    # Then close the issue
+    # Then update the title and close the issue
+    local current_title
+    current_title=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+         -H "Accept: application/vnd.github.v3+json" \
+         "https://api.github.com/repos/$repo/issues/$issue_number" | jq -r '.title')
+    
+    local new_title
+    if [[ "$current_title" == *"[RESOLVED]"* ]]; then
+        new_title="$current_title"
+    else
+        new_title="[RESOLVED] $current_title"
+    fi
+    
     local close_data
-close_data=$(jq -n '{"state": "closed"}')
+close_data=$(jq -n --arg title "$new_title" '{"title": $title, "state": "closed"}')
     curl -s -H "Authorization: token $GITHUB_TOKEN" \
          -H "Accept: application/vnd.github.v3+json" \
          -X PATCH \
@@ -220,7 +244,8 @@ fetch_repos_with_topic() {
   
   # If we found nothing via search and org is specified, try direct enumeration
   # This handles GitHub search indexing delays
-  if [[ -z "$repos" && "$org" != "" && "$org" != "all" ]]; then
+  local all_repos=""
+  if [[ -z "$(echo "$all_repos" | tr -d '\n')" && "$org" != "" && "$org" != "all" ]]; then
     if [[ "$DRY_RUN" == "true" ]]; then
       all_repos=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
            -H "Accept: application/vnd.github.v3+json" \
@@ -282,7 +307,7 @@ has_disabled_test_workflows() {
         workflows=$(gh_api "https://api.github.com/repos/$repo/actions/workflows")
     fi
     
-    echo "$workflows" | jq -r '.workflows[] | select(.name | test("(?i)test|ci|build|check")) | select(.state | test("(?i)disabled"))' | grep -q . > /dev/null
+    echo "$workflows" | jq -r '.workflows[] | select(.name | test("(?i)test|ci|build|check")) | select(.state == "disabled_manually" or .state == "disabled_inactivity")' | grep -q . > /dev/null
 }
 
 # Check if there are any closed notification issues
@@ -302,11 +327,12 @@ has_recently_closed_notification() {
     
     local issues
     issues=$(gh_api "https://api.github.com/repos/$repo/issues?state=closed")
-    if [[ "$issues" == *"[DRY-RUN]"* ]] || ! echo "$issues" | jq -e . >/dev/null 2>&1; then
+    if [[ "$issues" == *"[DRY-RUN]"* ]] || [[ "$issues" == "API_ERROR:"* ]] || ! echo "$issues" | jq -e . >/dev/null 2>&1; then
         return 1  # Skip if in dry-run or invalid JSON
     fi
+    # First filter issues with date-based titles, then check if any are recent
     echo "$issues" | jq -r --arg cutoff "$cutoff_date" \
-        '.[] | select(.title | contains("DDEV Add-on Test Workflows Suspended") and (.title | contains("[RESOLVED]") | not) and (.title | test("\\([0-9]{4}-[0-9]{2}-[0-9]{2}\\)"))) | select(.closed_at > $cutoff) | .number' 2>/dev/null | grep -q . > /dev/null
+        '.[] | select(.title | contains("DDEV Add-on Test Workflows Suspended") and (.title | test("\\([0-9]{4}-[0-9]{2}-[0-9]{2}\\)"))) | select(.closed_at > $cutoff) | .number' 2>/dev/null | grep -q . > /dev/null
 }
 
 # Get notification count from issue
@@ -384,11 +410,11 @@ handle_repo_with_tests() {
             fi
         else
             local issues
-            issues=$(gh_api "https://api.github.com/repos/$repo/issues?state=open")
-            if [[ "$issues" == *"[DRY-RUN]"* ]] || ! echo "$issues" | jq -e . >/dev/null 2>&1; then
+            issues=$(gh_api "https://api.github.com/search/issues?q=repo:$repo+state:open+in:title+DDEV+Add-on+Test+Workflows+Suspended")
+            if [[ "$issues" == *"[DRY-RUN]"* ]] || [[ "$issues" == "API_ERROR:"* ]] || ! echo "$issues" | jq -e . >/dev/null 2>&1; then
                 existing_issue=""
             else
-                existing_issue=$(echo "$issues" | jq -r '.[] | select(.title | contains("DDEV Add-on Test Workflows Suspended") and (.title | contains("[RESOLVED]") | not)) | .number' 2>/dev/null)
+                existing_issue=$(echo "$issues" | jq -r '.items[] | .number' 2>/dev/null | head -1)
             fi
         fi
         
@@ -401,7 +427,7 @@ notification_count=$(get_notification_count "$repo" "$existing_issue")
             elif was_recently_notified "$repo" "$existing_issue"; then
                 echo "  ✓ (recently notified)"
             else
-                gh_issue_comment "$repo" "$existing_issue" "⚠️ **Follow-up notification** ($notification_count/$MAX_NOTIFICATIONS): Test workflows remain suspended. Please re-enable them to ensure continued testing of your add-on with DDEV."
+                gh_issue_comment "$repo" "$existing_issue" "⚠️ **Follow-up notification** ($notification_count/$MAX_NOTIFICATIONS): Test workflows remain suspended. Please re-enable them to ensure continued testing of your add-on with DDEV." > /dev/null
                 echo "  📝 Follow-up comment added to issue #$existing_issue"
             fi
         else
@@ -447,7 +473,7 @@ As always, we're happy to help. Reach out to us here (we see most issues) or in 
 ---
 *This issue will be automatically updated if the problem persists. To stop receiving these notifications, please resolve the workflow issues or remove the ddev-get topic.*
 EOF
-)" "automated-notification,ddev-addon-test")
+)" "")
             
             local issue_number=""
             if [[ "$DRY_RUN" == "false" && "$issue_url" != *"DRY-RUN"* ]] && echo "$issue_url" | jq -e . >/dev/null 2>&1; then
@@ -491,11 +517,11 @@ EOF
             fi
         else
             local issues
-            issues=$(gh_api "https://api.github.com/repos/$repo/issues?state=open")
-            if [[ "$issues" == *"[DRY-RUN]"* ]] || ! echo "$issues" | jq -e . >/dev/null 2>&1; then
+            issues=$(gh_api "https://api.github.com/search/issues?q=repo:$repo+state:open+in:title+DDEV+Add-on+Test+Workflows+Suspended")
+            if [[ "$issues" == *"[DRY-RUN]"* ]] || [[ "$issues" == "API_ERROR:"* ]] || ! echo "$issues" | jq -e . >/dev/null 2>&1; then
                 open_issue=""
             else
-                open_issue=$(echo "$issues" | jq -r '.[] | select(.title | contains("DDEV Add-on Test Workflows Suspended") and (.title | contains("[RESOLVED]") | not)) | .number' 2>/dev/null)
+                open_issue=$(echo "$issues" | jq -r '.items[] | .number' 2>/dev/null | head -1)
             fi
         fi
         
