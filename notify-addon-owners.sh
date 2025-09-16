@@ -347,7 +347,8 @@ was_recently_notified() {
     
     local cutoff_date
     cutoff_date=$(${DATE} -d "${NOTIFICATION_INTERVAL_DAYS} days ago" -u +"%Y-%m-%dT%H:%M:%SZ")
-    local issue=$(gh_api "https://api.github.com/repos/$repo/issues/$issue_number")
+    local issue
+issue=$(gh_api "https://api.github.com/repos/$repo/issues/$issue_number")
     
     # Check creation date
     local created_at
@@ -357,7 +358,8 @@ was_recently_notified() {
     fi
     
     # Check for recent comments
-    local comments=$(gh_api "https://api.github.com/repos/$repo/issues/$issue_number/comments")
+    local comments
+comments=$(gh_api "https://api.github.com/repos/$repo/issues/$issue_number/comments")
     echo "$comments" | jq -r --arg cutoff "$cutoff_date" '.[] | select(.created_at > $cutoff) | .id' | grep -q . > /dev/null
 }
 
@@ -391,7 +393,8 @@ handle_repo_with_tests() {
         fi
         
         if [[ -n "$existing_issue" ]]; then
-            local notification_count=$(get_notification_count "$repo" "$existing_issue")
+            local notification_count
+notification_count=$(get_notification_count "$repo" "$existing_issue")
             
             if [[ $notification_count -ge $MAX_NOTIFICATIONS ]]; then
                 echo "  ✓ (max notifications reached)"
@@ -402,7 +405,8 @@ handle_repo_with_tests() {
                 echo "  📝 Follow-up comment added to issue #$existing_issue"
             fi
         else
-            local issue_title="⚠️ DDEV Add-on Test Workflows Suspended ($(${DATE} -u +"%Y-%m-%d"))"
+            local issue_title
+issue_title="⚠️ DDEV Add-on Test Workflows Suspended ($(${DATE} -u +"%Y-%m-%d"))"
             local issue_url
             issue_url=$(gh_issue_create "$repo" "$issue_title" "$(cat << EOF
 ## Test Workflows Suspended - Please re-enable
@@ -515,7 +519,7 @@ handle_repo_without_tests() {
 
 # Main notification function
 notify_about_disabled_workflows() {
-  local current_date=$(${DATE} +%s)
+  # local current_date=$(${DATE} +%s)  # Unused variable
   
   # Combine topic-based repos with additional repos and deduplicate
   topic_repos=()
