@@ -306,7 +306,7 @@ has_recently_closed_notification() {
         return 1  # Skip if in dry-run or invalid JSON
     fi
     echo "$issues" | jq -r --arg cutoff "$cutoff_date" \
-        '.[] | select(.title | contains("DDEV Add-on Test Workflows Suspended") and (.title | contains("[RESOLVED]") | not) and (.title | test("\\([0-9]{4}-[0-9]{2}-[0-9]{2}\\)"))) | select(.closed_at > $cutoff) | .number' | grep -q . > /dev/null
+        '.[] | select(.title | contains("DDEV Add-on Test Workflows Suspended") and (.title | contains("[RESOLVED]") | not) and (.title | test("\\([0-9]{4}-[0-9]{2}-[0-9]{2}\\)"))) | select(.closed_at > $cutoff) | .number' 2>/dev/null | grep -q . > /dev/null
 }
 
 # Get notification count from issue
@@ -388,7 +388,7 @@ handle_repo_with_tests() {
             if [[ "$issues" == *"[DRY-RUN]"* ]] || ! echo "$issues" | jq -e . >/dev/null 2>&1; then
                 existing_issue=""
             else
-                existing_issue=$(echo "$issues" | jq -r '.[] | select(.title | contains("DDEV Add-on Test Workflows Suspended") and (.title | contains("[RESOLVED]") | not)) | .number')
+                existing_issue=$(echo "$issues" | jq -r '.[] | select(.title | contains("DDEV Add-on Test Workflows Suspended") and (.title | contains("[RESOLVED]") | not)) | .number' 2>/dev/null)
             fi
         fi
         
@@ -495,7 +495,7 @@ EOF
             if [[ "$issues" == *"[DRY-RUN]"* ]] || ! echo "$issues" | jq -e . >/dev/null 2>&1; then
                 open_issue=""
             else
-                open_issue=$(echo "$issues" | jq -r '.[] | select(.title | contains("DDEV Add-on Test Workflows Suspended") and (.title | contains("[RESOLVED]") | not)) | .number')
+                open_issue=$(echo "$issues" | jq -r '.[] | select(.title | contains("DDEV Add-on Test Workflows Suspended") and (.title | contains("[RESOLVED]") | not)) | .number' 2>/dev/null)
             fi
         fi
         
