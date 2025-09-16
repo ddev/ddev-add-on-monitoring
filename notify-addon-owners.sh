@@ -290,8 +290,8 @@ count=$(echo "$workflows" | jq -r '.workflows | length')
         return 1  # No workflows
     fi
     
-    # Check if any workflow names contain test-related terms
-    echo "$workflows" | jq -r '.workflows[].name' | grep -iE "(test|ci|build|check)" > /dev/null
+    # Check if there's a tests workflow
+    echo "$workflows" | jq -r '.workflows[].name' | grep -i "^tests$" > /dev/null
 }
 
 # Check if any test workflows are disabled
@@ -307,7 +307,7 @@ has_disabled_test_workflows() {
         workflows=$(gh_api "https://api.github.com/repos/$repo/actions/workflows")
     fi
     
-    echo "$workflows" | jq -r '.workflows[] | select(.name | test("(?i)test|ci|build|check")) | select(.state == "disabled_manually" or .state == "disabled_inactivity")' | grep -q . > /dev/null
+    echo "$workflows" | jq -r '.workflows[] | select(.name | ascii_downcase == "tests") | select(.state == "disabled_manually" or .state == "disabled_inactivity")' | grep -q . > /dev/null
 }
 
 # Check if there are any closed notification issues
