@@ -18,7 +18,9 @@ org="all"  # Default to check all organizations
 additional_github_repos=""
 DRY_RUN=false
 EXIT_CODE=0
-RATE_LIMIT_REMAINING=5000  # Default to 5000 requests/hour
+RATE_LIMIT_REMAINING=5000  # Default to 5000 requests/hour for core API
+SEARCH_RATE_LIMIT_REMAINING=30  # Default to 30 requests/minute for search API
+START_REPO=1  # Start from the nth repository (1-based index)
 
 # Loop through arguments and process them
 for arg in "$@"
@@ -40,6 +42,10 @@ do
         DRY_RUN=true
         shift # Remove processed argument
         ;;
+        --start-repo=*)
+        START_REPO="${arg#*=}"
+        shift # Remove processed argument
+        ;;
         --help)
         echo "Usage: $0 [OPTIONS]"
         echo ""
@@ -47,12 +53,14 @@ do
         echo "  --github-token=TOKEN     GitHub personal access token (required)"
         echo "  --org=ORG                GitHub organization to filter by (default: all)"
         echo "  --additional-github-repos=REPOS  Comma-separated list of additional repositories"
+        echo "  --start-repo=N           Start processing from the Nth repository (1-based index)"
         echo "  --dry-run                Show what would be done without taking action"
         echo "  --help                   Show this help message"
         echo ""
         echo "Examples:"
         echo "  $0 --github-token=<token> --dry-run"
         echo "  $0 --github-token=<token> --org=ddev"
+        echo "  $0 --github-token=<token> --start-repo=50 --dry-run"
         echo "  $0 --github-token=<token> --org=myusername --dry-run"
         exit 0
         ;;
@@ -73,13 +81,30 @@ echo "Organization: $org"
 if [ "$DRY_RUN" = true ]; then
     echo "Mode: DRY RUN (no actions will be taken)"
 else
-    # Get actual rate limit status
-    rate_limit_response=$(curl -s -I -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/rate_limit")
-    actual_rate_limit=$(echo "$rate_limit_response" | grep -i "x-ratelimit-remaining:" | cut -d':' -f2 | tr -d ' \r\n')
-    if [[ -n "$actual_rate_limit" && "$actual_rate_limit" =~ ^[0-9]+$ ]]; then
-        RATE_LIMIT_REMAINING="$actual_rate_limit"
+    # Get actual core API rate limit status using the rate_limit endpoint
+    temp_core_headers="/tmp/core_headers_$$"
+    curl -s -I -D "$temp_core_headers" -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/rate_limit" > /dev/null
+    if [[ -f "$temp_core_headers" ]]; then
+        actual_rate_limit=$(grep -i "^x-ratelimit-remaining:" "$temp_core_headers" | head -1 | cut -d':' -f2 | tr -d ' \r\n')
+        if [[ -n "$actual_rate_limit" && "$actual_rate_limit" =~ ^[0-9]+$ ]]; then
+            RATE_LIMIT_REMAINING="$actual_rate_limit"
+        fi
+        rm -f "$temp_core_headers"
     fi
-    echo "Starting with $RATE_LIMIT_REMAINING API requests remaining"
+    
+    # Get search API rate limit using a minimal search query
+    temp_search_headers="/tmp/search_headers_$$"
+    curl -s -I -D "$temp_search_headers" -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/search/repositories?q=test&per_page=1" > /dev/null
+    if [[ -f "$temp_search_headers" ]]; then
+        actual_search_rate_limit=$(grep -i "^x-ratelimit-remaining:" "$temp_search_headers" | head -1 | cut -d':' -f2 | tr -d ' \r\n')
+        if [[ -n "$actual_search_rate_limit" && "$actual_search_rate_limit" =~ ^[0-9]+$ ]]; then
+            SEARCH_RATE_LIMIT_REMAINING="$actual_search_rate_limit"
+        fi
+        rm -f "$temp_search_headers"
+    fi
+    
+    echo "Starting with $RATE_LIMIT_REMAINING core API requests remaining"
+    echo "Starting with $SEARCH_RATE_LIMIT_REMAINING search API requests remaining"
 fi
 
 # Use brew coreutils gdate if it exists, otherwise things fail with macOS date
@@ -138,30 +163,58 @@ gh_api_safe() {
         return 0
     fi
     
-    # Check rate limit before making request
-    if [[ $RATE_LIMIT_REMAINING -lt 10 ]]; then
-        echo "RATE_LIMIT_ERROR: Only $RATE_LIMIT_REMAINING requests remaining. Pausing to avoid rate limit."
-        if [[ "$allow_skip" == "true" ]]; then
-            return 2  # Special exit code for rate limit (allowing skip)
-        else
-            return 1  # Fatal error
+    # Check appropriate rate limit before making request
+    if [[ "$endpoint" == *"search"* ]]; then
+        # This is a search API call
+        if [[ $SEARCH_RATE_LIMIT_REMAINING -lt 3 ]]; then
+            echo "SEARCH_RATE_LIMIT_ERROR: Only $SEARCH_RATE_LIMIT_REMAINING search requests remaining. Pausing to avoid search rate limit."
+            if [[ "$allow_skip" == "true" ]]; then
+                return 2  # Special exit code for rate limit (allowing skip)
+            else
+                return 1  # Fatal error
+            fi
+        fi
+    else
+        # This is a core API call
+        if [[ $RATE_LIMIT_REMAINING -lt 10 ]]; then
+            echo "RATE_LIMIT_ERROR: Only $RATE_LIMIT_REMAINING requests remaining. Pausing to avoid rate limit."
+            if [[ "$allow_skip" == "true" ]]; then
+                return 2  # Special exit code for rate limit (allowing skip)
+            else
+                return 1  # Fatal error
+            fi
         fi
     fi
     
     local response
-    local headers
-    response=$(curl -s -D /tmp/headers_$$ -H "Authorization: token $GITHUB_TOKEN" \
+    local temp_headers="/tmp/gh_headers_$$"
+    
+    # Make the API call and capture both response and headers
+    response=$(curl -s -D "$temp_headers" -H "Authorization: token $GITHUB_TOKEN" \
          -H "Accept: application/vnd.github.v3+json" \
          "$endpoint")
     
-    # Extract rate limit info from headers
-    if [[ -f "/tmp/headers_$$" ]]; then
+    # Extract rate limit info from headers if the file exists
+    if [[ -f "$temp_headers" ]]; then
         local rate_limit_remaining
-        rate_limit_remaining=$(grep -i "x-ratelimit-remaining:" "/tmp/headers_$$" | cut -d':' -f2 | tr -d ' \r\n')
+        local rate_limit_resource
+        
+        # Extract rate limit remaining (more robust pattern matching)
+        rate_limit_remaining=$(grep -i "^x-ratelimit-remaining:" "$temp_headers" | head -1 | cut -d':' -f2 | tr -d ' \r\n')
+        rate_limit_resource=$(grep -i "^x-ratelimit-resource:" "$temp_headers" | head -1 | cut -d':' -f2 | tr -d ' \r\n')
+        
+        # Update the appropriate rate limit counter
         if [[ -n "$rate_limit_remaining" && "$rate_limit_remaining" =~ ^[0-9]+$ ]]; then
-            RATE_LIMIT_REMAINING="$rate_limit_remaining"
+            if [[ "$rate_limit_resource" == "search" ]]; then
+                SEARCH_RATE_LIMIT_REMAINING="$rate_limit_remaining"
+            else
+                # For core API calls (default when no resource header or resource != "search")
+                RATE_LIMIT_REMAINING="$rate_limit_remaining"
+            fi
         fi
-        rm -f "/tmp/headers_$$"
+        
+        # Clean up temporary file
+        rm -f "$temp_headers"
     fi
     
     # Check if response is valid JSON
@@ -517,19 +570,26 @@ handle_repo_with_tests() {
             fi
         else
             local issues
+            local search_failed=false
             issues=$(gh_api_safe "https://api.github.com/search/issues?q=repo:$repo+state:open+in:title+DDEV+Add-on+Test+Workflows+Suspended")
             local api_exit_code=$?
             if [[ "$api_exit_code" -eq 2 ]]; then
-                echo "  ⚠️  Rate limit reached while searching for issues. Skipping issue search for $repo..."
+                echo "  ⚠️  Rate limit reached while searching for issues. Skipping issue operations for $repo to avoid duplicates..."
                 existing_issue=""
+                search_failed=true
             elif [[ "$api_exit_code" -ne 0 ]] || [[ "$issues" == "RATE_LIMIT_ERROR:"* ]] || ! echo "$issues" | jq -e . >/dev/null 2>&1; then
+                echo "  ⚠️  Failed to search for existing issues. Skipping issue operations for $repo to avoid duplicates..."
                 existing_issue=""
+                search_failed=true
             else
                 existing_issue=$(echo "$issues" | jq -r '.items[] | .number' 2>/dev/null | head -1)
             fi
         fi
         
-        if [[ -n "$existing_issue" ]]; then
+        if [[ "$search_failed" == "true" ]]; then
+            # Skip all issue operations if we couldn't search properly to avoid duplicates
+            return
+        elif [[ -n "$existing_issue" ]]; then
             local notification_count
 notification_count=$(get_notification_count "$repo" "$existing_issue")
             
@@ -666,20 +726,20 @@ process_repo() {
         local workflows_exit_code=$?
         if [[ "$workflows_exit_code" -eq 2 ]]; then
             rate_limit_hit=true
-            echo "❌ RATE LIMIT: $RATE_LIMIT_REMAINING"
+            echo "❌ RATE LIMIT [CORE: $RATE_LIMIT_REMAINING, SEARCH: $SEARCH_RATE_LIMIT_REMAINING]"
             return 0  # Continue processing other repos
         fi
         handle_repo_with_tests "$repo"
-        echo " [RATE LIMIT: $RATE_LIMIT_REMAINING]"
+        echo " [CORE: $RATE_LIMIT_REMAINING, SEARCH: $SEARCH_RATE_LIMIT_REMAINING]"
     else
         local workflows_exit_code=$?
         if [[ "$workflows_exit_code" -eq 2 ]]; then
             rate_limit_hit=true
-            echo "❌ RATE LIMIT: $RATE_LIMIT_REMAINING"
+            echo "❌ RATE LIMIT [CORE: $RATE_LIMIT_REMAINING, SEARCH: $SEARCH_RATE_LIMIT_REMAINING]"
             return 0  # Continue processing other repos
         fi
         handle_repo_without_tests "$repo"
-        echo " [RATE LIMIT: $RATE_LIMIT_REMAINING]"
+        echo " [CORE: $RATE_LIMIT_REMAINING, SEARCH: $SEARCH_RATE_LIMIT_REMAINING]"
     fi
 }
 
@@ -733,8 +793,16 @@ notify_about_disabled_workflows() {
   echo ""
   
   rate_limit_hit=false
-  for repo in "${unique_repos[@]}"; do
-    echo -n "Checking $repo... "
+  for i in "${!unique_repos[@]}"; do
+    local repo_num=$((i + 1))
+    local repo="${unique_repos[$i]}"
+    
+    # Skip if we haven't reached the starting repository
+    if [[ $repo_num -lt $START_REPO ]]; then
+        continue
+    fi
+    
+    echo -n "[$repo_num/$(( ${#unique_repos[@]} ))] Checking $repo... "
     
     # Wrap the repository processing in error handling
     if ! process_repo "$repo"; then
