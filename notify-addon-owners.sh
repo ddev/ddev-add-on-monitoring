@@ -300,9 +300,13 @@ has_recently_closed_notification() {
         fi
     fi
     
-    local issues=$(gh_api "https://api.github.com/repos/$repo/issues?state=closed&labels=automated-notification,ddev-addon-test")
+    local issues
+    issues=$(gh_api "https://api.github.com/repos/$repo/issues?state=closed")
+    if [[ "$issues" == *"[DRY-RUN]"* ]] || ! echo "$issues" | jq -e . >/dev/null 2>&1; then
+        return 1  # Skip if in dry-run or invalid JSON
+    fi
     echo "$issues" | jq -r --arg cutoff "$cutoff_date" \
-        '.[] | select(.title | contains("DDEV Add-on Test Workflows Suspended")) | select(.closed_at > $cutoff) | .number' | grep -q . > /dev/null
+        '.[] | select(.title | contains("DDEV Add-on Test Workflows Suspended") and (.title | contains("[RESOLVED]") | not) and (.title | test("\\([0-9]{4}-[0-9]{2}-[0-9]{2}\\)"))) | select(.closed_at > $cutoff) | .number' | grep -q . > /dev/null
 }
 
 # Get notification count from issue
@@ -320,7 +324,8 @@ get_notification_count() {
         return
     fi
     
-    local issue=$(gh_api "https://api.github.com/repos/$repo/issues/$issue_number")
+    local issue
+    issue=$(gh_api "https://api.github.com/repos/$repo/issues/$issue_number")
     local comment_count
     comment_count=$(echo "$issue" | jq -r '.comments')
     echo $((comment_count + 1))
@@ -369,14 +374,20 @@ handle_repo_with_tests() {
         fi
         
         # Look for existing open notification issue
-        local existing_issue=""
+        local existing_issue
+        existing_issue=""
         if [[ "$DRY_RUN" == "true" ]]; then
             if [[ "$repo" == *"has-issue"* ]]; then
                 existing_issue="123"
             fi
         else
-            local issues=$(gh_api "https://api.github.com/repos/$repo/issues?state=open&labels=automated-notification,ddev-addon-test")
-            existing_issue=$(echo "$issues" | jq -r '.[] | select(.title | contains("DDEV Add-on Test Workflows Suspended")) | .number')
+            local issues
+            issues=$(gh_api "https://api.github.com/repos/$repo/issues?state=open")
+            if [[ "$issues" == *"[DRY-RUN]"* ]] || ! echo "$issues" | jq -e . >/dev/null 2>&1; then
+                existing_issue=""
+            else
+                existing_issue=$(echo "$issues" | jq -r '.[] | select(.title | contains("DDEV Add-on Test Workflows Suspended") and (.title | contains("[RESOLVED]") | not)) | .number')
+            fi
         fi
         
         if [[ -n "$existing_issue" ]]; then
@@ -391,7 +402,9 @@ handle_repo_with_tests() {
                 echo "  📝 Follow-up comment added to issue #$existing_issue"
             fi
         else
-            local issue_url=$(gh_issue_create "$repo" "⚠️ DDEV Add-on Test Workflows Suspended" "$(cat << EOF
+            local issue_title="⚠️ DDEV Add-on Test Workflows Suspended ($(${DATE} -u +"%Y-%m-%d"))"
+            local issue_url
+            issue_url=$(gh_issue_create "$repo" "$issue_title" "$(cat << EOF
 ## Test Workflows Suspended - Please re-enable
 
 The automated test workflows for this DDEV add-on are currently disabled (GitHub disables them
@@ -466,14 +479,20 @@ EOF
         echo "✅ OK"
         
         # Close any open notification issues (only show if action taken)
-        local open_issue=""
+        local open_issue
+        open_issue=""
         if [[ "$DRY_RUN" == "true" ]]; then
             if [[ "$repo" == *"has-open-issue"* ]]; then
                 open_issue="456"
             fi
         else
-            local issues=$(gh_api "https://api.github.com/repos/$repo/issues?state=open&labels=automated-notification,ddev-addon-test")
-            open_issue=$(echo "$issues" | jq -r '.[] | select(.title | contains("DDEV Add-on Test Workflows Suspended")) | .number')
+            local issues
+            issues=$(gh_api "https://api.github.com/repos/$repo/issues?state=open")
+            if [[ "$issues" == *"[DRY-RUN]"* ]] || ! echo "$issues" | jq -e . >/dev/null 2>&1; then
+                open_issue=""
+            else
+                open_issue=$(echo "$issues" | jq -r '.[] | select(.title | contains("DDEV Add-on Test Workflows Suspended") and (.title | contains("[RESOLVED]") | not)) | .number')
+            fi
         fi
         
         if [[ -n "$open_issue" ]]; then
