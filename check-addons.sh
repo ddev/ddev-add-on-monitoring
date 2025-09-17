@@ -20,6 +20,7 @@ additional_repos=(
     "ddev/github-action-setup-ddev"
     "ddev/signing_tools"
     "ddev/sponsorship-data"
+    "ddev/ddev-gitlab-ci"
 )
 
 EXIT_CODE=0
