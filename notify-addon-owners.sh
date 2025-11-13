@@ -586,7 +586,7 @@ handle_repo_with_tests() {
             fi
         fi
         
-        if [[ "$search_failed" == "true" ]]; then
+        if [[ "${search_failed:-}" == "true" ]]; then
             # Skip all issue operations if we couldn't search properly to avoid duplicates
             return
         elif [[ -n "$existing_issue" ]]; then
