@@ -94,6 +94,29 @@ The script identifies repositories that lack test workflows and provides informa
 - Suggests adding test workflows
 - Recommends removing the `ddev-get` topic if tests won't be added
 
+### Required GitHub token scopes
+
+This tool only targets public repositories and needs to search/list and create/close issues.
+
+- Classic PAT (recommended for cross-org/public repos):
+    - public_repo
+
+- Fine-grained PAT:
+    - Repository access: All repositories in the target org(s) or the specific repositories you’ll monitor
+    - Permissions:
+        - Issues: Read and Write
+        - Metadata: Read-only
+        - Actions: Read-only (optional; not strictly required for reading workflow state on public repos)
+
+Notes
+- The Search API for public data does not require special scopes; authenticating primarily increases rate limits.
+- Creating/closing issues in public repositories requires public_repo for Classic PAT; no org admin scopes are needed.
+- Some repositories may restrict who can open issues (interaction limits or disabled issues). The script handles permission errors gracefully, but no additional scopes can bypass repo-level restrictions.
+
+Usage
+- Provide the token via `GITHUB_TOKEN`, for example:
+    - `export GITHUB_TOKEN=ghp_...`
+    - 
 ## Manual Testing
 
 ### Environment Variables
