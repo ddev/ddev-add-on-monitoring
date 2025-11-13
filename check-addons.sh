@@ -8,6 +8,14 @@
 # Also monitors additional critical DDEV repositories beyond add-ons
 # `./check-addons.sh --github-token=<token> --org=ddev
 
+# Token requirements (public repos only):
+# - Classic PAT: public_repo
+# - Fine-grained PAT: Issues (Read and Write), Metadata (Read-only); Actions (Read-only) optional.
+# - Provide via GITHUB_TOKEN (e.g., export GITHUB_TOKEN=ghp_...).
+# Notes:
+# - Search for public data does not need special scopes; auth mainly increases rate limits.
+# - No workflow/admin scopes required since this script only reads workflow state and creates/closes issues.
+
 set -eu -o pipefail
 
 topic="ddev-get" # Topic to filter repositories
