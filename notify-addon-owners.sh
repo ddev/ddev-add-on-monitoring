@@ -25,7 +25,7 @@ DRY_RUN=false
 EXIT_CODE=0
 RATE_LIMIT_REMAINING=5000  # Default to 5000 requests/hour for core API
 SEARCH_RATE_LIMIT_REMAINING=30  # Default to 30 requests/minute for search API
-START_REPO=1  # Start from the nth repository (1-based index)
+START_REPO="1"  # Start from the nth repository (1-based index) or a repo name (owner/repo)
 
 # Loop through arguments and process them
 for arg in "$@"
@@ -63,7 +63,7 @@ do
         echo "                               issues, and commenting on issues in add-on repos"
         echo "  --org=ORG                GitHub organization to filter by (default: all)"
         echo "  --additional-github-repos=REPOS  Comma-separated list of additional repositories"
-        echo "  --start-repo=N           Start processing from the Nth repository (1-based index)"
+        echo "  --start-repo=N|OWNER/REPO  Start processing from the Nth repo (1-based) or named repo"
         echo "  --dry-run                Show what would be done without taking action"
         echo "  --help                   Show this help message"
         echo ""
@@ -71,6 +71,7 @@ do
         echo "  $0 --github-token=<token> --dry-run"
         echo "  $0 --github-token=<token> --org=ddev"
         echo "  $0 --github-token=<token> --start-repo=50 --dry-run"
+        echo "  $0 --github-token=<token> --start-repo=ddev/ddev-redis --dry-run"
         echo "  $0 --github-token=<token> --org=myusername --dry-run"
         exit 0
         ;;
@@ -629,9 +630,8 @@ handle_repo_with_tests() {
             issues=$(gh_api_safe "https://api.github.com/search/issues?q=repo:$repo+state:open+in:title+DDEV+Add-on+Test+Workflows+Suspended")
             local api_exit_code=$?
             if [[ "$api_exit_code" -eq 2 ]]; then
-                echo "  ⚠️  Rate limit reached while searching for issues. Skipping issue operations for $repo to avoid duplicates..."
-                existing_issue=""
-                search_failed=true
+                echo "  ⚠️  Rate limit reached while searching for issues."
+                return 2
             elif [[ "$api_exit_code" -ne 0 ]] || [[ "$issues" == "RATE_LIMIT_ERROR:"* ]] || ! echo "$issues" | jq -e . >/dev/null 2>&1; then
                 echo "  ⚠️  Failed to search for existing issues. Skipping issue operations for $repo to avoid duplicates..."
                 existing_issue=""
@@ -746,8 +746,8 @@ EOF
             issues=$(gh_api_safe "https://api.github.com/search/issues?q=repo:$repo+state:open+in:title+DDEV+Add-on+Test+Workflows+Suspended")
             local api_exit_code=$?
             if [[ "$api_exit_code" -eq 2 ]]; then
-                echo "  ⚠️  Rate limit reached while searching for open issues. Skipping issue search for $repo..."
-                open_issue=""
+                echo "  ⚠️  Rate limit reached while searching for open issues."
+                return 2
             elif [[ "$api_exit_code" -ne 0 ]] || [[ "$issues" == "RATE_LIMIT_ERROR:"* ]] || ! echo "$issues" | jq -e . >/dev/null 2>&1; then
                 open_issue=""
             else
@@ -774,25 +774,25 @@ handle_repo_without_tests() {
 }
 
 # Process a single repository with error handling
+# Returns 2 if rate limit was hit (caller should stop processing)
 process_repo() {
     local repo="$1"
-    
-    if has_test_workflows "$repo"; then
-        local workflows_exit_code=$?
-        if [[ "$workflows_exit_code" -eq 2 ]]; then
-            rate_limit_hit=true
-            echo "❌ RATE LIMIT [CORE: $RATE_LIMIT_REMAINING, SEARCH: $SEARCH_RATE_LIMIT_REMAINING]"
-            return 0  # Continue processing other repos
+
+    local workflows_exit_code=0
+    has_test_workflows "$repo" || workflows_exit_code=$?
+    if [[ "$workflows_exit_code" -eq 2 ]]; then
+        echo "❌ RATE LIMIT [CORE: $RATE_LIMIT_REMAINING, SEARCH: $SEARCH_RATE_LIMIT_REMAINING]"
+        return 2
+    fi
+
+    if [[ "$workflows_exit_code" -eq 0 ]]; then
+        local handle_exit_code=0
+        handle_repo_with_tests "$repo" || handle_exit_code=$?
+        if [[ "$handle_exit_code" -eq 2 ]]; then
+            return 2
         fi
-        handle_repo_with_tests "$repo"
         echo " [CORE: $RATE_LIMIT_REMAINING, SEARCH: $SEARCH_RATE_LIMIT_REMAINING]"
     else
-        local workflows_exit_code=$?
-        if [[ "$workflows_exit_code" -eq 2 ]]; then
-            rate_limit_hit=true
-            echo "❌ RATE LIMIT [CORE: $RATE_LIMIT_REMAINING, SEARCH: $SEARCH_RATE_LIMIT_REMAINING]"
-            return 0  # Continue processing other repos
-        fi
         handle_repo_without_tests "$repo"
         echo " [CORE: $RATE_LIMIT_REMAINING, SEARCH: $SEARCH_RATE_LIMIT_REMAINING]"
     fi
@@ -846,32 +846,62 @@ notify_about_disabled_workflows() {
   total_additional=$((${#filtered_additional_repos[@]} + ${#cli_repos[@]}))
   echo "Checking ${#unique_repos[@]} total repositories (${#topic_repos[@]} from topic '${topic}', ${total_additional} additional)"
   echo ""
-  
+
+  # Resolve --start-repo if it's a repo name (contains '/') instead of a number
+  if [[ "$START_REPO" == *"/"* ]]; then
+    local start_repo_name="$START_REPO"
+    START_REPO=""
+    for i in "${!unique_repos[@]}"; do
+      if [[ "${unique_repos[$i]}" == "$start_repo_name" ]]; then
+        START_REPO=$((i + 1))
+        break
+      fi
+    done
+    if [[ -z "$START_REPO" ]]; then
+      echo "ERROR: Repository '$start_repo_name' not found in the repo list."
+      echo "Available repositories:"
+      for i in "${!unique_repos[@]}"; do
+        echo "  $((i + 1)): ${unique_repos[$i]}"
+      done
+      return 1
+    fi
+    echo "Starting from repository $START_REPO ($start_repo_name)"
+    echo ""
+  fi
+
   rate_limit_hit=false
   for i in "${!unique_repos[@]}"; do
     local repo_num=$((i + 1))
     local repo="${unique_repos[$i]}"
-    
+
     # Skip if we haven't reached the starting repository
     if [[ $repo_num -lt $START_REPO ]]; then
         continue
     fi
-    
+
     echo -n "[$repo_num/$(( ${#unique_repos[@]} ))] Checking $repo (https://github.com/$repo)... "
-    
+
     # Wrap the repository processing in error handling
-    if ! process_repo "$repo"; then
+    local process_exit_code=0
+    process_repo "$repo" || process_exit_code=$?
+    if [[ "$process_exit_code" -eq 2 ]]; then
+        rate_limit_hit=true
+        local next_repo_num=$((repo_num))
+        echo ""
+        echo ""
+        echo "❌ Rate limit hit while processing repository $repo_num/${#unique_repos[@]} ($repo)."
+        echo "   Processed $((repo_num - START_REPO)) of $((${#unique_repos[@]} - START_REPO + 1)) repositories in this run."
+        echo ""
+        echo "   To resume from this repository, run:"
+        echo "   $0 --github-token=<token> --start-repo=${next_repo_num}"
+        echo "   or:"
+        echo "   $0 --github-token=<token> --start-repo=${repo}"
+        break
+    elif [[ "$process_exit_code" -ne 0 ]]; then
         echo "❌ ERROR processing $repo"
         continue
     fi
   done
-  
-  if [[ "$rate_limit_hit" == "true" ]]; then
-    echo ""
-    echo "⚠️  Rate limit was reached during processing."
-    echo "Some repositories may have been skipped due to API rate limiting."
-    echo "Consider running the script again later or using a personal access token with higher rate limits."
-  fi
   echo ""
 }
 
