@@ -82,8 +82,53 @@ do
     esac
 done
 
-if [ "${GITHUB_TOKEN}" = "" ]; then 
+if [ "${GITHUB_TOKEN}" = "" ]; then
     echo "ERROR: --github-token must be set"
+    exit 5
+fi
+
+# Validate token and check capabilities early
+echo -n "Validating GitHub token... "
+token_check_headers="/tmp/token_check_headers_$$"
+token_check_response=$(curl -s -D "$token_check_headers" -H "Authorization: token $GITHUB_TOKEN" \
+    -H "Accept: application/vnd.github.v3+json" \
+    "https://api.github.com/user" 2>&1)
+
+if [[ -f "$token_check_headers" ]]; then
+    http_status=$(head -1 "$token_check_headers" | grep -o '[0-9]\{3\}' | head -1)
+    if [[ "$http_status" == "401" ]]; then
+        echo "FAILED"
+        echo "ERROR: Invalid or expired GitHub token (HTTP 401 Unauthorized)"
+        rm -f "$token_check_headers"
+        exit 5
+    elif [[ "$http_status" == "403" ]]; then
+        echo "FAILED"
+        echo "ERROR: GitHub token is forbidden (HTTP 403). Check token permissions."
+        rm -f "$token_check_headers"
+        exit 5
+    fi
+
+    token_user=$(echo "$token_check_response" | jq -r '.login // "unknown"' 2>/dev/null)
+
+    # Check scopes for classic tokens (fine-grained tokens don't return x-oauth-scopes)
+    oauth_scopes=$(grep -i "^x-oauth-scopes:" "$token_check_headers" | cut -d':' -f2- | tr -d '\r\n' | xargs)
+    if [[ -n "$oauth_scopes" ]]; then
+        echo "OK (user: $token_user, scopes: $oauth_scopes)"
+        # Warn if missing required scopes
+        if ! echo "$oauth_scopes" | grep -qiE '(^|,)\s*repo\s*(,|$)'; then
+            if ! echo "$oauth_scopes" | grep -qi 'public_repo'; then
+                echo "WARNING: Token may lack required scopes. Need 'repo' or 'public_repo'."
+                echo "         Current scopes: $oauth_scopes"
+                echo "         The script will continue but may fail on some API calls."
+            fi
+        fi
+    else
+        echo "OK (user: $token_user, fine-grained token)"
+    fi
+    rm -f "$token_check_headers"
+else
+    echo "FAILED"
+    echo "ERROR: Could not connect to GitHub API"
     exit 5
 fi
 
@@ -366,7 +411,7 @@ fetch_repos_with_topic() {
   # First try GitHub search
   page=1
   while :; do
-    query="topic:$topic"
+    query="topic:$topic+archived:false"
     # only add org filter if org is specified and not "all"
     if [ "${org}" != "" ] && [ "${org}" != "all" ]; then query="${query}+org:$org"; fi
     
