@@ -22,10 +22,17 @@ GITHUB_TOKEN=""
 org="all"  # Default to check all organizations
 additional_github_repos=""
 DRY_RUN=false
+REPORT=false
 EXIT_CODE=0
 RATE_LIMIT_REMAINING=5000  # Default to 5000 requests/hour for core API
 SEARCH_RATE_LIMIT_REMAINING=30  # Default to 30 requests/minute for search API
 START_REPO="1"  # Start from the nth repository (1-based index) or a repo name (owner/repo)
+
+# Report tracking arrays
+REPORT_OK=()
+REPORT_DISABLED=()
+REPORT_NO_TESTS=()
+REPORT_ERRORS=()
 
 # Loop through arguments and process them
 for arg in "$@"
@@ -47,6 +54,10 @@ do
         DRY_RUN=true
         shift # Remove processed argument
         ;;
+        --report)
+        REPORT=true
+        shift # Remove processed argument
+        ;;
         --start-repo=*)
         START_REPO="${arg#*=}"
         shift # Remove processed argument
@@ -65,6 +76,7 @@ do
         echo "  --additional-github-repos=REPOS  Comma-separated list of additional repositories"
         echo "  --start-repo=N|OWNER/REPO  Start processing from the Nth repo (1-based) or named repo"
         echo "  --dry-run                Show what would be done without taking action"
+        echo "  --report                 Print a categorized summary report at the end"
         echo "  --help                   Show this help message"
         echo ""
         echo "Examples:"
@@ -610,6 +622,7 @@ handle_repo_with_tests() {
     local repo="$1"
     
     if has_disabled_test_workflows "$repo"; then
+        REPORT_DISABLED+=("$repo")
         echo "⚠️  DISABLED WORKFLOWS"
         
         if has_recently_closed_notification "$repo"; then
@@ -732,8 +745,9 @@ EOF
             fi
         fi
     else
+        REPORT_OK+=("$repo")
         echo "✅ OK"
-        
+
         # Close any open notification issues (only show if action taken)
         local open_issue
         open_issue=""
@@ -765,6 +779,7 @@ EOF
 # Handle repositories without test workflows
 handle_repo_without_tests() {
     local repo="$1"
+    REPORT_NO_TESTS+=("$repo")
     echo "⚠️  No test workflows found"
     
     # Only show this info in dry-run mode
@@ -898,6 +913,7 @@ notify_about_disabled_workflows() {
         echo "   $0 --github-token=<token> --start-repo=${repo}"
         break
     elif [[ "$process_exit_code" -ne 0 ]]; then
+        REPORT_ERRORS+=("$repo")
         echo "❌ ERROR processing $repo"
         continue
     fi
@@ -919,6 +935,44 @@ if [[ "$DRY_RUN" == "true" ]]; then
     echo "- Mode: DRY RUN (no actions taken)"
 else
     echo "- Mode: LIVE (actions may have been taken)"
+fi
+
+# Print categorized report if requested
+if [[ "$REPORT" == "true" ]]; then
+    echo ""
+    echo "======================================"
+    echo "  REPORT"
+    echo "======================================"
+    echo ""
+    echo "Tests OK: ${#REPORT_OK[@]}"
+    echo "Disabled workflows: ${#REPORT_DISABLED[@]}"
+    echo "No test workflows: ${#REPORT_NO_TESTS[@]}"
+    echo "Errors: ${#REPORT_ERRORS[@]}"
+
+    if [[ ${#REPORT_DISABLED[@]} -gt 0 ]]; then
+        echo ""
+        echo "--- Disabled workflows (${#REPORT_DISABLED[@]}) ---"
+        for repo in "${REPORT_DISABLED[@]}"; do
+            echo "  https://github.com/$repo"
+        done
+    fi
+
+    if [[ ${#REPORT_NO_TESTS[@]} -gt 0 ]]; then
+        echo ""
+        echo "--- No test workflows (${#REPORT_NO_TESTS[@]}) ---"
+        for repo in "${REPORT_NO_TESTS[@]}"; do
+            echo "  https://github.com/$repo"
+        done
+    fi
+
+    if [[ ${#REPORT_ERRORS[@]} -gt 0 ]]; then
+        echo ""
+        echo "--- Errors (${#REPORT_ERRORS[@]}) ---"
+        for repo in "${REPORT_ERRORS[@]}"; do
+            echo "  https://github.com/$repo"
+        done
+    fi
+    echo ""
 fi
 
 exit ${EXIT_CODE}
