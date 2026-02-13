@@ -4,6 +4,11 @@
 # and sends notifications to repository owners when workflows are suspended.
 # Uses GitHub issues for tracking notification history to avoid external state.
 # `./notify-addon-owners.sh --github-token=<token> --dry-run`
+#
+# GITHUB_TOKEN requirements:
+#   - Classic token: 'repo' scope (or 'public_repo' for public repos only)
+#   - Fine-grained token: "Actions" (read), "Issues" (read/write) permissions
+#   - The token must have access to the repositories being monitored.
 
 set -eu -o pipefail
 
@@ -50,7 +55,12 @@ do
         echo "Usage: $0 [OPTIONS]"
         echo ""
         echo "Options:"
-        echo "  --github-token=TOKEN     GitHub personal access token (required)"
+        echo "  --github-token=TOKEN     GitHub personal access token (required)."
+        echo "                           The token needs the following scopes:"
+        echo "                             - 'repo' (Full control of private repositories)"
+        echo "                               or 'public_repo' (Access public repositories)"
+        echo "                             - Required for: reading workflows, creating/closing"
+        echo "                               issues, and commenting on issues in add-on repos"
         echo "  --org=ORG                GitHub organization to filter by (default: all)"
         echo "  --additional-github-repos=REPOS  Comma-separated list of additional repositories"
         echo "  --start-repo=N           Start processing from the Nth repository (1-based index)"
@@ -802,7 +812,7 @@ notify_about_disabled_workflows() {
         continue
     fi
     
-    echo -n "[$repo_num/$(( ${#unique_repos[@]} ))] Checking $repo... "
+    echo -n "[$repo_num/$(( ${#unique_repos[@]} ))] Checking $repo (https://github.com/$repo)... "
     
     # Wrap the repository processing in error handling
     if ! process_repo "$repo"; then
