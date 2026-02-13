@@ -1121,7 +1121,7 @@ notify_about_disabled_workflows() {
     if [[ $repo_num -lt $START_REPO ]]; then
         continue
     fi
-    
+
     echo -n "[$repo_num/$(( ${#unique_repos[@]} ))] Checking $repo (https://github.com/$repo)... "
 
     # Wrap the repository processing in error handling
