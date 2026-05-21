@@ -23,12 +23,13 @@ topic="ddev-get" # Topic to filter repositories
 # Additional repositories to monitor beyond topic-based filtering
 # These are critical DDEV infrastructure repositories with scheduled tests
 additional_repos=(
+    "ddev/coder-ddev"
     "ddev/ddev"
+    "ddev/ddev-gitlab-ci"
     "ddev/github-action-add-on-test"
     "ddev/github-action-setup-ddev"
     "ddev/signing_tools"
     "ddev/sponsorship-data"
-    "ddev/ddev-gitlab-ci"
 )
 
 EXIT_CODE=0
