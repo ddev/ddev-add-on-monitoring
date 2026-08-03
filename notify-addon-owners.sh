@@ -212,6 +212,9 @@ or the add-on is irrelevant, please remove the 'ddev-get' topic from the reposit
 
 FOLLOWUP_REMINDER_SUFFIX='Run `curl -fsSL https://ddev.com/s/addon-update-checker.sh | bash` to check for other maintenance issues, or remove the `ddev-get` topic if this add-on no longer needs to be discoverable.'
 
+# Labels applied to notification issues (GitHub creates them automatically if they don't exist yet)
+NOTIFICATION_LABELS="automated-notification,ddev-addon-test"
+
 # Notification-type title markers: phrase (for jq/title matching) and query (for the search API, '+' for spaces)
 DISABLED_TITLE_PHRASE="DDEV Add-on Test Workflows Suspended"
 DISABLED_TITLE_QUERY="DDEV+Add-on+Test+Workflows+Suspended"
@@ -339,7 +342,7 @@ gh_issue_create() {
     
     local data
 data=$(jq -n --arg title "$title" --arg body "$body" --arg labels "$labels" \
-        '{"title": $title, "body": $body, "labels": ($labels | split(","))}')
+        '{"title": $title, "body": $body, "labels": (if $labels == "" then [] else ($labels | split(",")) end)}')
     
     local response
     local temp_headers="/tmp/gh_write_headers_$$"
@@ -790,7 +793,7 @@ As always, we're happy to help. Reach out to us here (we see most issues) or in 
 ---
 *This issue will be automatically updated if the problem persists. To stop receiving these notifications, please resolve the workflow issues or remove the ddev-get topic.*
 EOF
-)" "")
+)" "$NOTIFICATION_LABELS")
             
             local issue_number=""
             if [[ "$DRY_RUN" == "false" && "$issue_url" != *"DRY-RUN"* ]] && echo "$issue_url" | jq -e . >/dev/null 2>&1; then
@@ -919,7 +922,7 @@ As always, we're happy to help. Reach out to us here (we see most issues) or in 
 ---
 *This issue will be automatically updated if the problem persists. To stop receiving these notifications, please add a test workflow or remove the ddev-get topic.*
 EOF
-)" "")
+)" "$NOTIFICATION_LABELS")
 
         local issue_number=""
         if [[ "$DRY_RUN" == "false" && "$issue_url" != *"DRY-RUN"* ]] && echo "$issue_url" | jq -e . >/dev/null 2>&1; then
