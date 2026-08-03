@@ -85,6 +85,12 @@ do
         echo "  $0 --github-token=<token> --start-repo=50 --dry-run"
         echo "  $0 --github-token=<token> --start-repo=ddev/ddev-redis --dry-run"
         echo "  $0 --github-token=<token> --org=myusername --dry-run"
+        echo ""
+        echo "Safely providing the token:"
+        echo "  There is no GITHUB_TOKEN environment variable fallback, so avoid typing or"
+        echo "  pasting the raw token. If you're authenticated with the gh CLI, pull it from"
+        echo "  there instead so the literal token never lands in your shell history:"
+        echo "    $0 --github-token=\$(gh auth token) --dry-run"
         exit 0
         ;;
         *)
@@ -191,37 +197,7 @@ additional_repos=(
     "ddev/sponsorship-data"
 )
 
-# Wrapper functions that respect dry-run mode
-gh_api() {
-    local endpoint="$1"
-    if [[ "$DRY_RUN" == "true" ]]; then
-        echo "[DRY-RUN] Would call GitHub API: $endpoint"
-        return 0
-    fi
-    local response
-    response=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
-         -H "Accept: application/vnd.github.v3+json" \
-         "$endpoint")
-    
-    # Check if response is valid JSON
-    if ! echo "$response" | jq -e . >/dev/null 2>&1; then
-        echo "DEBUG: Response was not valid JSON: $response"
-        echo "API_ERROR: Invalid JSON response"
-        return 1
-    fi
-    
-    # Check if it's an error response
-    if echo "$response" | jq -e '.message' >/dev/null 2>&1; then
-        local error_msg
-        error_msg=$(echo "$response" | jq -r '.message')
-        echo "API_ERROR: $error_msg"
-        return 1
-    fi
-    
-    echo "$response"
-}
-
-# Enhanced API wrapper with rate limit handling
+# API wrapper with rate limit handling, respects dry-run mode
 gh_api_safe() {
     local endpoint="$1"
     local allow_skip="${2:-true}"  # Allow skipping on rate limit errors
@@ -316,6 +292,19 @@ gh_api_safe() {
     echo "$response"
 }
 
+# Update RATE_LIMIT_REMAINING from a captured curl -D header file, then remove it
+update_rate_limit_from_headers() {
+    local headers_file="$1"
+    if [[ -f "$headers_file" ]]; then
+        local remaining
+        remaining=$(grep -i "^x-ratelimit-remaining:" "$headers_file" | head -1 | cut -d':' -f2 | tr -d ' \r\n')
+        if [[ -n "$remaining" && "$remaining" =~ ^[0-9]+$ ]]; then
+            RATE_LIMIT_REMAINING="$remaining"
+        fi
+        rm -f "$headers_file"
+    fi
+}
+
 gh_issue_create() {
     local repo="$1"
     local title="$2"
@@ -332,13 +321,15 @@ data=$(jq -n --arg title "$title" --arg body "$body" --arg labels "$labels" \
         '{"title": $title, "body": $body, "labels": ($labels | split(","))}')
     
     local response
-response=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+    local temp_headers="/tmp/gh_write_headers_$$"
+response=$(curl -s -D "$temp_headers" -H "Authorization: token $GITHUB_TOKEN" \
          -H "Accept: application/vnd.github.v3+json" \
          -X POST \
          -H "Content-Type: application/json" \
          -d "$data" \
          "https://api.github.com/repos/$repo/issues" 2>&1)
-    
+    update_rate_limit_from_headers "$temp_headers"
+
     # Check if response is valid JSON and has an error message
     if echo "$response" | jq -e . >/dev/null 2>&1; then
         # Check if it's an error response (has message field)
@@ -367,13 +358,17 @@ gh_issue_comment() {
     
     local data
 data=$(jq -n --arg body "$comment" '{"body": $body}')
-    
-    curl -s -H "Authorization: token $GITHUB_TOKEN" \
+
+    local response
+    local temp_headers="/tmp/gh_write_headers_$$"
+    response=$(curl -s -D "$temp_headers" -H "Authorization: token $GITHUB_TOKEN" \
          -H "Accept: application/vnd.github.v3+json" \
          -X POST \
          -H "Content-Type: application/json" \
          -d "$data" \
-         "https://api.github.com/repos/$repo/issues/$issue_number/comments"
+         "https://api.github.com/repos/$repo/issues/$issue_number/comments")
+    update_rate_limit_from_headers "$temp_headers"
+    echo "$response"
 }
 
 gh_issue_close() {
@@ -389,34 +384,40 @@ gh_issue_close() {
     # First add a comment explaining the closure
     local comment_data
 comment_data=$(jq -n --arg body "$comment" '{"body": $body}')
-    curl -s -H "Authorization: token $GITHUB_TOKEN" \
+    local temp_headers="/tmp/gh_write_headers_$$"
+    curl -s -D "$temp_headers" -H "Authorization: token $GITHUB_TOKEN" \
          -H "Accept: application/vnd.github.v3+json" \
          -X POST \
          -H "Content-Type: application/json" \
          -d "$comment_data" \
          "https://api.github.com/repos/$repo/issues/$issue_number/comments" > /dev/null
-    
+    update_rate_limit_from_headers "$temp_headers"
+
     # Then update the title and close the issue
     local current_title
-    current_title=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+    temp_headers="/tmp/gh_write_headers_$$"
+    current_title=$(curl -s -D "$temp_headers" -H "Authorization: token $GITHUB_TOKEN" \
          -H "Accept: application/vnd.github.v3+json" \
          "https://api.github.com/repos/$repo/issues/$issue_number" | jq -r '.title')
-    
+    update_rate_limit_from_headers "$temp_headers"
+
     local new_title
     if [[ "$current_title" == *"[RESOLVED]"* ]]; then
         new_title="$current_title"
     else
         new_title="[RESOLVED] $current_title"
     fi
-    
+
     local close_data
 close_data=$(jq -n --arg title "$new_title" '{"title": $title, "state": "closed"}')
-    curl -s -H "Authorization: token $GITHUB_TOKEN" \
+    temp_headers="/tmp/gh_write_headers_$$"
+    curl -s -D "$temp_headers" -H "Authorization: token $GITHUB_TOKEN" \
          -H "Accept: application/vnd.github.v3+json" \
          -X PATCH \
          -H "Content-Type: application/json" \
          -d "$close_data" \
          "https://api.github.com/repos/$repo/issues/$issue_number" > /dev/null
+    update_rate_limit_from_headers "$temp_headers"
 }
 
 # Fetch all repositories with the specified topic
@@ -456,59 +457,51 @@ fetch_repos_with_topic() {
   done
 }
 
-# Check if repo has any test workflows
-has_test_workflows() {
+# Fetch a repo's workflow list once; shared by workflows_has_tests and
+# workflows_has_disabled_tests so we don't hit /actions/workflows twice per repo.
+# Prints the workflows JSON on stdout; returns 2 on rate limit/API error.
+fetch_workflows_json() {
     local repo="$1"
-    
-    local workflows=""
+
     if [[ "$DRY_RUN" == "true" ]]; then
-        workflows=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+        curl -s -H "Authorization: token $GITHUB_TOKEN" \
              -H "Accept: application/vnd.github.v3+json" \
-             "https://api.github.com/repos/$repo/actions/workflows")
-    else
-        workflows=$(gh_api_safe "https://api.github.com/repos/$repo/actions/workflows")
-        local api_exit_code=$?
-        if [[ "$api_exit_code" -eq 2 ]]; then
-            echo "❌ Rate limit reached while checking workflows for $repo. Skipping..."
-            return 2  # Special code for rate limit
-        elif [[ "$api_exit_code" -ne 0 ]] || [[ "$workflows" == "RATE_LIMIT_ERROR:"* ]]; then
-            echo "❌ API error checking workflows for $repo. Skipping..."
-            return 2
-        fi
+             "https://api.github.com/repos/$repo/actions/workflows"
+        return 0
     fi
-    
+
+    local workflows
+    workflows=$(gh_api_safe "https://api.github.com/repos/$repo/actions/workflows")
+    local api_exit_code=$?
+    if [[ "$api_exit_code" -eq 2 ]]; then
+        echo "❌ Rate limit reached while checking workflows for $repo. Skipping..." >&2
+        return 2  # Special code for rate limit
+    elif [[ "$api_exit_code" -ne 0 ]] || [[ "$workflows" == "RATE_LIMIT_ERROR:"* ]]; then
+        echo "❌ API error checking workflows for $repo. Skipping..." >&2
+        return 2
+    fi
+
+    echo "$workflows"
+}
+
+# Check if a previously-fetched workflows JSON has any workflow named "tests"
+workflows_has_tests() {
+    local workflows="$1"
+
     local count
 count=$(echo "$workflows" | jq -r '.workflows | length')
-    
+
     if [[ "$count" -eq 0 ]]; then
         return 1  # No workflows
     fi
-    
-    # Check if there's a tests workflow
+
     echo "$workflows" | jq -r '.workflows[].name' | grep -i "^tests$" > /dev/null
 }
 
-# Check if any test workflows are disabled
-has_disabled_test_workflows() {
-    local repo="$1"
-    
-    local workflows=""
-    if [[ "$DRY_RUN" == "true" ]]; then
-        workflows=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
-             -H "Accept: application/vnd.github.v3+json" \
-             "https://api.github.com/repos/$repo/actions/workflows")
-    else
-        workflows=$(gh_api_safe "https://api.github.com/repos/$repo/actions/workflows")
-        local api_exit_code=$?
-        if [[ "$api_exit_code" -eq 2 ]]; then
-            echo "❌ Rate limit reached while checking disabled workflows for $repo. Assuming not disabled..."
-            return 1  # Assume not disabled on rate limit
-        elif [[ "$api_exit_code" -ne 0 ]] || [[ "$workflows" == "RATE_LIMIT_ERROR:"* ]]; then
-            echo "❌ API error checking disabled workflows for $repo. Assuming not disabled..."
-            return 1
-        fi
-    fi
-    
+# Check if a previously-fetched workflows JSON shows the "tests" workflow disabled
+workflows_has_disabled_tests() {
+    local workflows="$1"
+
     echo "$workflows" | jq -r '.workflows[] | select(.name | ascii_downcase == "tests") | select(.state == "disabled_manually" or .state == "disabled_inactivity")' | grep -q . > /dev/null
 }
 
@@ -547,7 +540,8 @@ has_recently_closed_notification() {
 get_notification_count() {
     local repo="$1"
     local issue_number="$2"
-    
+    local issue="${3:-}"  # Optional pre-fetched issue JSON, to avoid re-fetching
+
     if [[ "$DRY_RUN" == "true" ]]; then
         # In dry-run mode, simulate notification count
         if [[ "$repo" == *"max-notifications"* ]]; then
@@ -557,16 +551,17 @@ get_notification_count() {
         fi
         return
     fi
-    
-    local issue
-    issue=$(gh_api_safe "https://api.github.com/repos/$repo/issues/$issue_number")
-    local api_exit_code=$?
-    if [[ "$api_exit_code" -eq 2 ]]; then
-        echo "0"  # Default to 0 on rate limit
-        return
-    elif [[ "$api_exit_code" -ne 0 ]] || [[ "$issue" == "RATE_LIMIT_ERROR:"* ]]; then
-        echo "0"  # Default to 0 on API error
-        return
+
+    if [[ -z "$issue" ]]; then
+        issue=$(gh_api_safe "https://api.github.com/repos/$repo/issues/$issue_number")
+        local api_exit_code=$?
+        if [[ "$api_exit_code" -eq 2 ]]; then
+            echo "0"  # Default to 0 on rate limit
+            return
+        elif [[ "$api_exit_code" -ne 0 ]] || [[ "$issue" == "RATE_LIMIT_ERROR:"* ]]; then
+            echo "0"  # Default to 0 on API error
+            return
+        fi
     fi
     local comment_count
     comment_count=$(echo "$issue" | jq -r '.comments')
@@ -577,7 +572,8 @@ get_notification_count() {
 was_recently_notified() {
     local repo="$1"
     local issue_number="$2"
-    
+    local issue="${3:-}"  # Optional pre-fetched issue JSON, to avoid re-fetching
+
     if [[ "$DRY_RUN" == "true" ]]; then
         # In dry-run mode, simulate recent notification
         if [[ "$repo" == *"recently-notified"* ]]; then
@@ -586,10 +582,10 @@ was_recently_notified() {
             return 1  # OK to notify
         fi
     fi
-    
+
     local cutoff_date
     cutoff_date=$(${DATE} -d "${NOTIFICATION_INTERVAL_DAYS} days ago" -u +"%Y-%m-%dT%H:%M:%SZ")
-    local issue
+    if [[ -z "$issue" ]]; then
 issue=$(gh_api_safe "https://api.github.com/repos/$repo/issues/$issue_number")
 local api_exit_code=$?
 if [[ "$api_exit_code" -eq 2 ]]; then
@@ -597,7 +593,8 @@ if [[ "$api_exit_code" -eq 2 ]]; then
 elif [[ "$api_exit_code" -ne 0 ]] || [[ "$issue" == "RATE_LIMIT_ERROR:"* ]]; then
     return 1  # Skip on API error
 fi
-    
+    fi
+
     # Check creation date
     local created_at
     created_at=$(echo "$issue" | jq -r '.created_at')
@@ -620,8 +617,9 @@ fi
 # Handle repositories with test workflows
 handle_repo_with_tests() {
     local repo="$1"
-    
-    if has_disabled_test_workflows "$repo"; then
+    local workflows="$2"
+
+    if workflows_has_disabled_tests "$workflows"; then
         REPORT_DISABLED+=("$repo")
         echo "⚠️  DISABLED WORKFLOWS"
         
@@ -658,12 +656,25 @@ handle_repo_with_tests() {
             # Skip all issue operations if we couldn't search properly to avoid duplicates
             return
         elif [[ -n "$existing_issue" ]]; then
+            # Fetch the issue once and reuse it for both checks below
+            local existing_issue_json=""
+            if [[ "$DRY_RUN" != "true" ]]; then
+                existing_issue_json=$(gh_api_safe "https://api.github.com/repos/$repo/issues/$existing_issue")
+                local issue_fetch_exit_code=$?
+                if [[ "$issue_fetch_exit_code" -eq 2 ]]; then
+                    echo "  ⚠️  Rate limit reached while checking notification issue."
+                    return 2
+                elif [[ "$issue_fetch_exit_code" -ne 0 ]] || [[ "$existing_issue_json" == "RATE_LIMIT_ERROR:"* ]]; then
+                    existing_issue_json=""  # Let the helpers below fall back to fetching individually
+                fi
+            fi
+
             local notification_count
-notification_count=$(get_notification_count "$repo" "$existing_issue")
-            
+notification_count=$(get_notification_count "$repo" "$existing_issue" "$existing_issue_json")
+
             if [[ $notification_count -ge $MAX_NOTIFICATIONS ]]; then
                 echo "  ✓ (max notifications reached)"
-            elif was_recently_notified "$repo" "$existing_issue"; then
+            elif was_recently_notified "$repo" "$existing_issue" "$existing_issue_json"; then
                 echo "  ✓ (recently notified)"
             else
                 gh_issue_comment "$repo" "$existing_issue" "⚠️ **Follow-up notification** ($notification_count/$MAX_NOTIFICATIONS): Test workflows remain suspended. Please re-enable them to ensure continued testing of your add-on with DDEV." > /dev/null
@@ -793,16 +804,17 @@ handle_repo_without_tests() {
 process_repo() {
     local repo="$1"
 
-    local workflows_exit_code=0
-    has_test_workflows "$repo" || workflows_exit_code=$?
-    if [[ "$workflows_exit_code" -eq 2 ]]; then
+    local workflows
+    local fetch_exit_code=0
+    workflows=$(fetch_workflows_json "$repo") || fetch_exit_code=$?
+    if [[ "$fetch_exit_code" -eq 2 ]]; then
         echo "❌ RATE LIMIT [CORE: $RATE_LIMIT_REMAINING, SEARCH: $SEARCH_RATE_LIMIT_REMAINING]"
         return 2
     fi
 
-    if [[ "$workflows_exit_code" -eq 0 ]]; then
+    if workflows_has_tests "$workflows"; then
         local handle_exit_code=0
-        handle_repo_with_tests "$repo" || handle_exit_code=$?
+        handle_repo_with_tests "$repo" "$workflows" || handle_exit_code=$?
         if [[ "$handle_exit_code" -eq 2 ]]; then
             return 2
         fi
