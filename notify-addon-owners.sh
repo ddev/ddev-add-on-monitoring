@@ -188,7 +188,11 @@ if command -v gdate >/dev/null; then DATE=gdate; fi
 # Topic to filter repositories
 topic="ddev-get"
 
-# Additional repositories to monitor beyond topic-based filtering
+# Additional repositories to monitor beyond topic-based filtering. These are core DDEV
+# infrastructure repos, not community add-ons -- they're still categorized as OK/disabled/
+# no-tests for reporting, but never sent add-on-specific notification issues/comments (see
+# is_notification_excluded), since that wording ("remove the ddev-get topic", "this add-on",
+# ddev-addon-template) doesn't apply to them.
 additional_repos=(
     "ddev/ddev"
     "ddev/github-action-add-on-test"
@@ -196,6 +200,18 @@ additional_repos=(
     "ddev/signing_tools"
     "ddev/sponsorship-data"
 )
+
+# True (0) if repo should be excluded from actual notifications (still monitored/reported)
+is_notification_excluded() {
+    local repo="$1"
+    local excluded
+    for excluded in "${additional_repos[@]}"; do
+        if [[ "$repo" == "$excluded" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
 
 # Shared maintainer-guidance snippets, reused across notification issue bodies/comments.
 # Single-quoted so the literal backticks in these markdown code spans stay literal --
@@ -329,21 +345,17 @@ update_rate_limit_from_headers() {
     fi
 }
 
-gh_issue_create() {
+# Perform the actual issue-create POST; returns the raw GitHub response JSON (success or error)
+create_issue_request() {
     local repo="$1"
     local title="$2"
     local body="$3"
     local labels="$4"
-    
-    if [[ "$DRY_RUN" == "true" ]]; then
-        echo "[DRY-RUN] Would create notification issue in $repo"
-        return 0
-    fi
-    
+
     local data
 data=$(jq -n --arg title "$title" --arg body "$body" --arg labels "$labels" \
         '{"title": $title, "body": $body, "labels": (if $labels == "" then [] else ($labels | split(",")) end)}')
-    
+
     local response
     local temp_headers="/tmp/gh_write_headers_$$"
 response=$(curl -s -D "$temp_headers" -H "Authorization: token $GITHUB_TOKEN" \
@@ -353,6 +365,33 @@ response=$(curl -s -D "$temp_headers" -H "Authorization: token $GITHUB_TOKEN" \
          -d "$data" \
          "https://api.github.com/repos/$repo/issues" 2>&1)
     update_rate_limit_from_headers "$temp_headers"
+    echo "$response"
+}
+
+gh_issue_create() {
+    local repo="$1"
+    local title="$2"
+    local body="$3"
+    local labels="$4"
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        echo "[DRY-RUN] Would create notification issue in $repo"
+        return 0
+    fi
+
+    local response
+    response=$(create_issue_request "$repo" "$title" "$body" "$labels")
+
+    # Applying labels that don't already exist on the repo requires write access, which we
+    # often don't have on third-party add-on repos. Don't let that block the notification
+    # itself -- retry without labels rather than failing outright.
+    if [[ -n "$labels" ]] && echo "$response" | jq -e '.message' >/dev/null 2>&1; then
+        local error_msg
+        error_msg=$(echo "$response" | jq -r '.message')
+        if [[ "$error_msg" == *"permission to create labels"* ]]; then
+            response=$(create_issue_request "$repo" "$title" "$body" "")
+        fi
+    fi
 
     # Check if response is valid JSON and has an error message
     if echo "$response" | jq -e . >/dev/null 2>&1; then
@@ -693,6 +732,17 @@ handle_repo_with_tests() {
     local repo="$1"
     local workflows="$2"
 
+    if is_notification_excluded "$repo"; then
+        if workflows_has_disabled_tests "$workflows"; then
+            REPORT_DISABLED+=("$repo")
+            echo "⚠️  DISABLED WORKFLOWS (notifications excluded for this repo)"
+        else
+            REPORT_OK+=("$repo")
+            echo "✅ OK"
+        fi
+        return
+    fi
+
     # A "tests" workflow now exists (enabled or disabled), so any earlier "missing test
     # workflow" notification is resolved regardless of which branch below we take.
     close_resolved_notification "$repo" "$NO_TESTS_TITLE_QUERY" "has-no-tests-open-issue" \
@@ -839,6 +889,11 @@ handle_repo_without_tests() {
     local repo="$1"
     REPORT_NO_TESTS+=("$repo")
     echo "⚠️  No test workflows found"
+
+    if is_notification_excluded "$repo"; then
+        echo "  (notifications excluded for this repo)"
+        return
+    fi
 
     if has_recently_closed_notification "$repo" "$NO_TESTS_TITLE_PHRASE" "recently-closed-no-tests"; then
         echo "  ✓ (in cooldown period)"
