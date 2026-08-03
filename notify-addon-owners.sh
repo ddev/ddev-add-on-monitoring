@@ -197,6 +197,27 @@ additional_repos=(
     "ddev/sponsorship-data"
 )
 
+# Shared maintainer-guidance snippets, reused across notification issue bodies/comments.
+# Single-quoted so the literal backticks in these markdown code spans stay literal --
+# they get interpolated into unquoted heredocs below via "$VAR", which is safe because
+# parameter expansion doesn't re-scan the substituted text for backticks/$ of its own.
+UPDATE_CHECKER_RESOURCE='- Run the DDEV add-on update checker to catch outdated workflow files and other common maintenance issues:
+  ```bash
+  curl -fsSL https://ddev.com/s/addon-update-checker.sh | bash
+  ```
+- [DDEV Add-on Maintenance Guide](https://ddev.com/blog/ddev-add-on-maintenance-guide/)'
+
+TOPIC_REMOVAL_REMINDER="If you don't want to be notified about this, or the tests are irrelevant,
+or the add-on is irrelevant, please remove the 'ddev-get' topic from the repository."
+
+FOLLOWUP_REMINDER_SUFFIX='Run `curl -fsSL https://ddev.com/s/addon-update-checker.sh | bash` to check for other maintenance issues, or remove the `ddev-get` topic if this add-on no longer needs to be discoverable.'
+
+# Notification-type title markers: phrase (for jq/title matching) and query (for the search API, '+' for spaces)
+DISABLED_TITLE_PHRASE="DDEV Add-on Test Workflows Suspended"
+DISABLED_TITLE_QUERY="DDEV+Add-on+Test+Workflows+Suspended"
+NO_TESTS_TITLE_PHRASE="DDEV Add-on Missing Test Workflows"
+NO_TESTS_TITLE_QUERY="DDEV+Add-on+Missing+Test+Workflows"
+
 # API wrapper with rate limit handling, respects dry-run mode
 gh_api_safe() {
     local endpoint="$1"
@@ -420,6 +441,54 @@ close_data=$(jq -n --arg title "$new_title" '{"title": $title, "state": "closed"
     update_rate_limit_from_headers "$temp_headers"
 }
 
+# Search for an open issue whose title contains the given words (joined by '+' for the query).
+# Prints the issue number on stdout (empty if none found). Returns 2 on rate limit, 1 if the
+# search itself failed (caller should treat that as "unknown" and avoid creating a duplicate).
+find_open_notification_issue() {
+    local repo="$1"
+    local title_words="$2"
+
+    local issues
+    issues=$(gh_api_safe "https://api.github.com/search/issues?q=repo:$repo+state:open+in:title+${title_words}")
+    local api_exit_code=$?
+    if [[ "$api_exit_code" -eq 2 ]]; then
+        return 2
+    elif [[ "$api_exit_code" -ne 0 ]] || [[ "$issues" == "RATE_LIMIT_ERROR:"* ]] || ! echo "$issues" | jq -e . >/dev/null 2>&1; then
+        return 1
+    fi
+    echo "$issues" | jq -r '.items[] | .number' 2>/dev/null | head -1
+}
+
+# Close any open notification issue matching title_words, if one exists.
+# Returns 2 on rate limit (caller should stop processing this repo).
+close_resolved_notification() {
+    local repo="$1"
+    local title_words="$2"
+    local dry_run_stub="$3"
+    local close_comment="$4"
+
+    local open_issue=""
+    if [[ "$DRY_RUN" == "true" ]]; then
+        if [[ "$repo" == *"$dry_run_stub"* ]]; then
+            open_issue="456"
+        fi
+    else
+        open_issue=$(find_open_notification_issue "$repo" "$title_words")
+        local search_exit_code=$?
+        if [[ "$search_exit_code" -eq 2 ]]; then
+            echo "  ⚠️  Rate limit reached while searching for open issues."
+            return 2
+        elif [[ "$search_exit_code" -ne 0 ]]; then
+            open_issue=""
+        fi
+    fi
+
+    if [[ -n "$open_issue" ]]; then
+        gh_issue_close "$repo" "$open_issue" "$close_comment"
+        echo "  🔒 Closed resolved notification issue #$open_issue"
+    fi
+}
+
 # Fetch all repositories with the specified topic
 fetch_repos_with_topic() {
   # First try GitHub search
@@ -505,21 +574,23 @@ workflows_has_disabled_tests() {
     echo "$workflows" | jq -r '.workflows[] | select(.name | ascii_downcase == "tests") | select(.state == "disabled_manually" or .state == "disabled_inactivity")' | grep -q . > /dev/null
 }
 
-# Check if there are any closed notification issues
+# Check if there are any closed notification issues whose title contains title_phrase
 has_recently_closed_notification() {
     local repo="$1"
+    local title_phrase="$2"
+    local dry_run_stub="$3"
     local cutoff_date
     cutoff_date=$(${DATE} -d "${RENOTIFICATION_COOLDOWN_DAYS} days ago" -u +"%Y-%m-%dT%H:%M:%SZ")
-    
+
     if [[ "$DRY_RUN" == "true" ]]; then
         # In dry-run mode, simulate recent closures
-        if [[ "$repo" == *"recently-closed"* ]]; then
+        if [[ "$repo" == *"$dry_run_stub"* ]]; then
             return 0  # Has recent closures
         else
             return 1  # No recent closures
         fi
     fi
-    
+
     local issues
     issues=$(gh_api_safe "https://api.github.com/repos/$repo/issues?state=closed")
     local api_exit_code=$?
@@ -532,8 +603,8 @@ has_recently_closed_notification() {
         return 1  # Skip if in dry-run or invalid JSON
     fi
     # First filter issues with date-based titles, then check if any are recent
-    echo "$issues" | jq -r --arg cutoff "$cutoff_date" \
-        '.[] | select(.title | contains("DDEV Add-on Test Workflows Suspended") and (.title | test("\\([0-9]{4}-[0-9]{2}-[0-9]{2}\\)"))) | select(.closed_at > $cutoff) | .number' 2>/dev/null | grep -q . > /dev/null
+    echo "$issues" | jq -r --arg cutoff "$cutoff_date" --arg phrase "$title_phrase" \
+        '.[] | select(.title | contains($phrase) and (.title | test("\\([0-9]{4}-[0-9]{2}-[0-9]{2}\\)"))) | select(.closed_at > $cutoff) | .number' 2>/dev/null | grep -q . > /dev/null
 }
 
 # Get notification count from issue
@@ -619,43 +690,39 @@ handle_repo_with_tests() {
     local repo="$1"
     local workflows="$2"
 
+    # A "tests" workflow now exists (enabled or disabled), so any earlier "missing test
+    # workflow" notification is resolved regardless of which branch below we take.
+    close_resolved_notification "$repo" "$NO_TESTS_TITLE_QUERY" "has-no-tests-open-issue" \
+        "✅ A test workflow now exists for this add-on. Closing this notification." || return 2
+
     if workflows_has_disabled_tests "$workflows"; then
         REPORT_DISABLED+=("$repo")
         echo "⚠️  DISABLED WORKFLOWS"
-        
-        if has_recently_closed_notification "$repo"; then
+
+        if has_recently_closed_notification "$repo" "$DISABLED_TITLE_PHRASE" "recently-closed"; then
             echo "  ✓ (in cooldown period)"
             return
         fi
-        
+
         # Look for existing open notification issue
-        local existing_issue
-        existing_issue=""
+        local existing_issue=""
         if [[ "$DRY_RUN" == "true" ]]; then
             if [[ "$repo" == *"has-issue"* ]]; then
                 existing_issue="123"
             fi
         else
-            local issues
-            local search_failed=false
-            issues=$(gh_api_safe "https://api.github.com/search/issues?q=repo:$repo+state:open+in:title+DDEV+Add-on+Test+Workflows+Suspended")
-            local api_exit_code=$?
-            if [[ "$api_exit_code" -eq 2 ]]; then
+            existing_issue=$(find_open_notification_issue "$repo" "$DISABLED_TITLE_QUERY")
+            local search_exit_code=$?
+            if [[ "$search_exit_code" -eq 2 ]]; then
                 echo "  ⚠️  Rate limit reached while searching for issues."
                 return 2
-            elif [[ "$api_exit_code" -ne 0 ]] || [[ "$issues" == "RATE_LIMIT_ERROR:"* ]] || ! echo "$issues" | jq -e . >/dev/null 2>&1; then
+            elif [[ "$search_exit_code" -ne 0 ]]; then
                 echo "  ⚠️  Failed to search for existing issues. Skipping issue operations for $repo to avoid duplicates..."
-                existing_issue=""
-                search_failed=true
-            else
-                existing_issue=$(echo "$issues" | jq -r '.items[] | .number' 2>/dev/null | head -1)
+                return
             fi
         fi
-        
-        if [[ "${search_failed:-}" == "true" ]]; then
-            # Skip all issue operations if we couldn't search properly to avoid duplicates
-            return
-        elif [[ -n "$existing_issue" ]]; then
+
+        if [[ -n "$existing_issue" ]]; then
             # Fetch the issue once and reuse it for both checks below
             local existing_issue_json=""
             if [[ "$DRY_RUN" != "true" ]]; then
@@ -677,12 +744,12 @@ notification_count=$(get_notification_count "$repo" "$existing_issue" "$existing
             elif was_recently_notified "$repo" "$existing_issue" "$existing_issue_json"; then
                 echo "  ✓ (recently notified)"
             else
-                gh_issue_comment "$repo" "$existing_issue" "⚠️ **Follow-up notification** ($notification_count/$MAX_NOTIFICATIONS): Test workflows remain suspended. Please re-enable them to ensure continued testing of your add-on with DDEV." > /dev/null
+                gh_issue_comment "$repo" "$existing_issue" "⚠️ **Follow-up notification** ($notification_count/$MAX_NOTIFICATIONS): Test workflows remain suspended. Please re-enable them to ensure continued testing of your add-on with DDEV. $FOLLOWUP_REMINDER_SUFFIX" > /dev/null
                 echo "  📝 Follow-up comment added to issue #$existing_issue"
             fi
         else
             local issue_title
-issue_title="⚠️ DDEV Add-on Test Workflows Suspended ($(${DATE} -u +"%Y-%m-%d"))"
+issue_title="⚠️ ${DISABLED_TITLE_PHRASE} ($(${DATE} -u +"%Y-%m-%d"))"
             local issue_url
             issue_url=$(gh_issue_create "$repo" "$issue_title" "$(cat << EOF
 ## Test Workflows Suspended - Please re-enable
@@ -705,7 +772,7 @@ If you don't want to be notified about this, or the tests are irrelevant,
 or the add-on is irrelevant, please remove the 'ddev-get' topic from the repository.
 
 ### Resources
-- [DDEV Add-on Maintenance Guide](https://ddev.com/blog/ddev-add-on-maintenance-guide/)
+$UPDATE_CHECKER_RESOURCE
 - [Why workflows get disabled now and they didn't used to](https://github.com/ddev/github-action-add-on-test/issues/46)
 - [GitHub Actions Documentation](https://docs.github.com/en/actions)
 
@@ -759,31 +826,8 @@ EOF
         REPORT_OK+=("$repo")
         echo "✅ OK"
 
-        # Close any open notification issues (only show if action taken)
-        local open_issue
-        open_issue=""
-        if [[ "$DRY_RUN" == "true" ]]; then
-            if [[ "$repo" == *"has-open-issue"* ]]; then
-                open_issue="456"
-            fi
-        else
-            local issues
-            issues=$(gh_api_safe "https://api.github.com/search/issues?q=repo:$repo+state:open+in:title+DDEV+Add-on+Test+Workflows+Suspended")
-            local api_exit_code=$?
-            if [[ "$api_exit_code" -eq 2 ]]; then
-                echo "  ⚠️  Rate limit reached while searching for open issues."
-                return 2
-            elif [[ "$api_exit_code" -ne 0 ]] || [[ "$issues" == "RATE_LIMIT_ERROR:"* ]] || ! echo "$issues" | jq -e . >/dev/null 2>&1; then
-                open_issue=""
-            else
-                open_issue=$(echo "$issues" | jq -r '.items[] | .number' 2>/dev/null | head -1)
-            fi
-        fi
-        
-        if [[ -n "$open_issue" ]]; then
-            gh_issue_close "$repo" "$open_issue" "✅ Test workflows are now active. Closing this notification."
-            echo "  🔒 Closed resolved notification issue #$open_issue"
-        fi
+        close_resolved_notification "$repo" "$DISABLED_TITLE_QUERY" "has-open-issue" \
+            "✅ Test workflows are now active. Closing this notification." || return 2
     fi
 }
 
@@ -792,10 +836,120 @@ handle_repo_without_tests() {
     local repo="$1"
     REPORT_NO_TESTS+=("$repo")
     echo "⚠️  No test workflows found"
-    
-    # Only show this info in dry-run mode
+
+    if has_recently_closed_notification "$repo" "$NO_TESTS_TITLE_PHRASE" "recently-closed-no-tests"; then
+        echo "  ✓ (in cooldown period)"
+        return
+    fi
+
+    # Look for existing open notification issue
+    local existing_issue=""
     if [[ "$DRY_RUN" == "true" ]]; then
-        echo "  💡 Consider suggesting they add tests or remove 'ddev-get' topic"
+        if [[ "$repo" == *"has-no-tests-issue"* ]]; then
+            existing_issue="789"
+        fi
+    else
+        existing_issue=$(find_open_notification_issue "$repo" "$NO_TESTS_TITLE_QUERY")
+        local search_exit_code=$?
+        if [[ "$search_exit_code" -eq 2 ]]; then
+            echo "  ⚠️  Rate limit reached while searching for issues."
+            return 2
+        elif [[ "$search_exit_code" -ne 0 ]]; then
+            echo "  ⚠️  Failed to search for existing issues. Skipping issue operations for $repo to avoid duplicates..."
+            return
+        fi
+    fi
+
+    if [[ -n "$existing_issue" ]]; then
+        # Fetch the issue once and reuse it for both checks below
+        local existing_issue_json=""
+        if [[ "$DRY_RUN" != "true" ]]; then
+            existing_issue_json=$(gh_api_safe "https://api.github.com/repos/$repo/issues/$existing_issue")
+            local issue_fetch_exit_code=$?
+            if [[ "$issue_fetch_exit_code" -eq 2 ]]; then
+                echo "  ⚠️  Rate limit reached while checking notification issue."
+                return 2
+            elif [[ "$issue_fetch_exit_code" -ne 0 ]] || [[ "$existing_issue_json" == "RATE_LIMIT_ERROR:"* ]]; then
+                existing_issue_json=""  # Let the helpers below fall back to fetching individually
+            fi
+        fi
+
+        local notification_count
+notification_count=$(get_notification_count "$repo" "$existing_issue" "$existing_issue_json")
+
+        if [[ $notification_count -ge $MAX_NOTIFICATIONS ]]; then
+            echo "  ✓ (max notifications reached)"
+        elif was_recently_notified "$repo" "$existing_issue" "$existing_issue_json"; then
+            echo "  ✓ (recently notified)"
+        else
+            gh_issue_comment "$repo" "$existing_issue" "⚠️ **Follow-up notification** ($notification_count/$MAX_NOTIFICATIONS): This add-on still has no automated test workflow. $FOLLOWUP_REMINDER_SUFFIX" > /dev/null
+            echo "  📝 Follow-up comment added to issue #$existing_issue"
+        fi
+    else
+        local issue_title
+issue_title="📋 ${NO_TESTS_TITLE_PHRASE} ($(${DATE} -u +"%Y-%m-%d"))"
+        local issue_url
+        issue_url=$(gh_issue_create "$repo" "$issue_title" "$(cat << EOF
+## No Test Workflows Found
+
+This DDEV add-on repository has the 'ddev-get' topic but no automated test workflow. Without
+tests, we have no way to know when this add-on breaks against new DDEV releases, and neither do you.
+
+### Action Required
+Add a test workflow so this add-on gets automatically tested against new DDEV releases. The
+[ddev-addon-template](https://github.com/ddev/ddev-addon-template) repository has the recommended
+tests.yml workflow you can copy.
+
+$TOPIC_REMOVAL_REMINDER
+
+### Resources
+$UPDATE_CHECKER_RESOURCE
+- [ddev-addon-template](https://github.com/ddev/ddev-addon-template)
+- [GitHub Actions Documentation](https://docs.github.com/en/actions)
+
+### Support
+
+As always, we're happy to help. Reach out to us here (we see most issues) or in the [DDEV Discord](https://ddev.com/s/discord) or [DDEV Issue Queue](https://github.com/ddev/ddev/issues).
+
+### Notification Info
+- This is an automated notification (1/$MAX_NOTIFICATIONS)
+- Created: $(${DATE} -u +"%Y-%m-%d")
+- Repository: $repo
+
+---
+*This issue will be automatically updated if the problem persists. To stop receiving these notifications, please add a test workflow or remove the ddev-get topic.*
+EOF
+)" "")
+
+        local issue_number=""
+        if [[ "$DRY_RUN" == "false" && "$issue_url" != *"DRY-RUN"* ]] && echo "$issue_url" | jq -e . >/dev/null 2>&1; then
+            # Check for error response
+            if echo "$issue_url" | jq -e '.error' >/dev/null 2>&1; then
+                local error_msg
+                error_msg=$(echo "$issue_url" | jq -r '.error')
+                case "$error_msg" in
+                    "Not Found")
+                        echo "  ❌ Cannot create notification issue: Issues are disabled on this repository or token lacks permissions"
+                        ;;
+                    "Resource not accessible by personal access token")
+                        echo "  ❌ Cannot create notification issue: Token lacks write permissions for this repository"
+                        ;;
+                    "Bad credentials")
+                        echo "  ❌ Cannot create notification issue: Invalid GitHub token"
+                        ;;
+                    *)
+                        echo "  ❌ Cannot create notification issue: $error_msg"
+                        ;;
+                esac
+            else
+                issue_number=$(echo "$issue_url" | jq -r '.number')
+                local issue_html_url
+                issue_html_url=$(echo "$issue_url" | jq -r '.html_url')
+                echo "  🔔 Created notification issue #$issue_number: $issue_html_url"
+            fi
+        else
+            echo "  🔔 Would create notification issue"
+        fi
     fi
 }
 
@@ -820,7 +974,11 @@ process_repo() {
         fi
         echo " [CORE: $RATE_LIMIT_REMAINING, SEARCH: $SEARCH_RATE_LIMIT_REMAINING]"
     else
-        handle_repo_without_tests "$repo"
+        local handle_exit_code=0
+        handle_repo_without_tests "$repo" || handle_exit_code=$?
+        if [[ "$handle_exit_code" -eq 2 ]]; then
+            return 2
+        fi
         echo " [CORE: $RATE_LIMIT_REMAINING, SEARCH: $SEARCH_RATE_LIMIT_REMAINING]"
     fi
 }

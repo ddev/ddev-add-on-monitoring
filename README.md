@@ -90,9 +90,12 @@ Test specific owner's repositories:
 
 ### Repositories Without Test Workflows
 
-The script identifies repositories that lack test workflows and provides information for manual follow-up:
-- Suggests adding test workflows
-- Recommends removing the `ddev-get` topic if tests won't be added
+Repositories that have the `ddev-get` topic but no `tests` workflow at all go through the same
+notification lifecycle as disabled workflows (create, follow up up to twice, cooldown after
+closure). The issue points maintainers at the `ddev-addon-template` repository's recommended
+`tests.yml`, the `addon-update-checker.sh` script, and the option to remove the `ddev-get` topic
+if the add-on doesn't need to be automatically discoverable. The notification is automatically
+closed once a `tests` workflow shows up, whether or not it's currently enabled.
 
 ### Required GitHub token scopes
 
