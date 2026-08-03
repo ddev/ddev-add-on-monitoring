@@ -90,9 +90,12 @@ Test specific owner's repositories:
 
 ### Repositories Without Test Workflows
 
-The script identifies repositories that lack test workflows and provides information for manual follow-up:
-- Suggests adding test workflows
-- Recommends removing the `ddev-get` topic if tests won't be added
+Repositories that have the `ddev-get` topic but no `tests` workflow at all go through the same
+notification lifecycle as disabled workflows (create, follow up up to twice, cooldown after
+closure). The issue points maintainers at the `ddev-addon-template` repository's recommended
+`tests.yml`, the `addon-update-checker.sh` script, and the option to remove the `ddev-get` topic
+if the add-on doesn't need to be automatically discoverable. The notification is automatically
+closed once a `tests` workflow shows up, whether or not it's currently enabled.
 
 ### Required GitHub token scopes
 
@@ -113,10 +116,16 @@ Notes
 - Creating/closing issues in public repositories requires public_repo for Classic PAT; no org admin scopes are needed.
 - Some repositories may restrict who can open issues (interaction limits or disabled issues). The script handles permission errors gracefully, but no additional scopes can bypass repo-level restrictions.
 
-Usage
-- Provide the token via `GITHUB_TOKEN`, for example:
-    - `export GITHUB_TOKEN=ghp_...`
-    - 
+### Safely providing the token
+
+The script only accepts the token via `--github-token=<token>` (there is no `GITHUB_TOKEN` environment variable fallback), so avoid typing or pasting the raw token on the command line. If you're already authenticated with the `gh` CLI, pull the token from it instead:
+
+```bash
+./notify-addon-owners.sh --github-token=$(gh auth token) --dry-run
+```
+
+This keeps the literal token out of your shell history — only the `$(gh auth token)` expression is recorded, not the value it expands to.
+
 ## Manual Testing
 
 ### Environment Variables
