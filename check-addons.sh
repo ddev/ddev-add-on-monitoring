@@ -38,6 +38,23 @@ EXIT_CODE=0
 GITHUB_TOKEN=""
 org=""
 additional_github_repos=""
+DRY_RUN=false
+
+print_help() {
+  echo "Usage: $0 [OPTIONS]"
+  echo ""
+  echo "Options:"
+  echo "  --github-token=TOKEN          GitHub personal access token (required unless using --help)"
+  echo "  --org=ORG                     GitHub organization to filter by (use \"all\" for all orgs)"
+  echo "  --additional-github-repos=REPOS  Comma-separated list of additional repositories to monitor"
+  echo "  --dry-run                     Show what would be checked without calling the GitHub API"
+  echo "  --help                        Show this help message"
+  echo ""
+  echo "Examples:"
+  echo "  $0 --github-token=<token> --org=ddev"
+  echo "  $0 --github-token=<token> --additional-github-repos=owner/repo1,owner/repo2"
+  echo "  $0 --dry-run --org=ddev"
+}
 
 # Loop through arguments and process them
 for arg in "$@"
@@ -55,12 +72,40 @@ do
         additional_github_repos="${arg#*=}"
         shift # Remove processed argument
         ;;
+        --dry-run)
+        DRY_RUN=true
+        shift # Remove processed argument
+        ;;
+        --help)
+        print_help
+        exit 0
+        ;;
         *)
-        # Skip unknown options
+        echo "Unknown option: $arg"
+        echo "Use --help for usage information"
+        exit 1
         ;;
     esac
 done
 
+
+if [ "$DRY_RUN" = true ]; then
+  echo "Mode: DRY RUN (no GitHub API calls will be made)"
+  echo "Organization: ${org:-all}"
+  echo "Topic: $topic"
+  echo "Built-in additional repositories:"
+  for repo in "${additional_repos[@]}"; do
+    echo "  - $repo"
+  done
+  if [[ -n "$additional_github_repos" ]]; then
+    echo "CLI-provided additional repositories:"
+    IFS=',' read -ra cli_repos <<< "$additional_github_repos"
+    for repo in "${cli_repos[@]}"; do
+      echo "  - $repo"
+    done
+  fi
+  exit 0
+fi
 
 if [ "${GITHUB_TOKEN}" = "" ]; then echo "--github-token must be set"; exit 5; fi
 echo "Organization: $org"
@@ -135,12 +180,14 @@ check_recent_scheduled_run() {
   echo "Checking ${#unique_repos[@]} total repositories (${#topic_repos[@]} from topic '${topic}', ${total_additional} additional)"
   
   for repo in "${unique_repos[@]}"; do
+    repo_url="https://github.com/$repo"
+    actions_url="$repo_url/actions"
     # Fetch only the most recent scheduled workflow run
     response=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/$repo/actions/runs?event=schedule&per_page=1")
 
     # Check if any runs are returned
     if [ "$(echo "$response" | jq -r '.workflow_runs | length')" -eq 0 ]; then
-      echo "ERROR: No scheduled runs found for $repo"
+      echo "ERROR: No scheduled runs found for $repo. Check workflows at $actions_url"
       EXIT_CODE=3
       continue # Skip to the next repository
     fi
@@ -148,21 +195,20 @@ check_recent_scheduled_run() {
     # Extract the conclusion of the most recent scheduled run
     status=$(echo "$response" | jq -r '.workflow_runs[0] | select(.conclusion != null) | .conclusion')
     timestamp=$(echo $response | jq -r '.workflow_runs[0].updated_at')
+    run_url=$(echo "$response" | jq -r '.workflow_runs[0].html_url')
 
     local run_date=$(echo "$response" | jq -r '.workflow_runs[0].updated_at')
     local run_date_seconds=$(${DATE} -d "$run_date" +%s)  # Convert run date to seconds since the Unix epoch
 
     # Check if the run date is within the last day
     if [[ "${run_date_seconds}" -le "$one_day_ago" ]]; then
-        echo "ERROR: The most recent scheduled run for $repo was not within the last day."
+      echo "ERROR: The most recent scheduled run for $repo was not within the last day. Latest run: $run_url (workflow list: $actions_url)"
         EXIT_CODE=2
     fi
 
 
     echo "$repo: $status (${timestamp})"
     if [[ "$status" == "failure" ]]; then
-      # Get URL of the failed run
-      run_url=$(echo "$response" | jq -r '.workflow_runs[0].html_url')
       echo "ERROR: Scheduled test failed in $repo at $run_url ($timestamp)"
       EXIT_CODE=1
     fi

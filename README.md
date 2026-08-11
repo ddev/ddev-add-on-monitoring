@@ -25,6 +25,11 @@ Basic usage:
 ./check-addons.sh --github-token=<token> --org=ddev
 ```
 
+Preview what would be checked without calling the GitHub API:
+```bash
+./check-addons.sh --dry-run --org=ddev
+```
+
 Add additional repositories to monitor:
 ```bash
 ./check-addons.sh --github-token=<token> --org=ddev --additional-github-repos="owner/repo1,owner/repo2,owner/repo3"
@@ -35,6 +40,8 @@ Add additional repositories to monitor:
 - `--github-token=TOKEN` - GitHub personal access token (required)
 - `--org=ORG` - GitHub organization to filter by (use "all" for all orgs)  
 - `--additional-github-repos=REPOS` - Comma-separated list of additional repositories to monitor
+- `--dry-run` - Show what would be checked without calling the GitHub API
+- `--help` - Show help information
 
 ### Exit codes
 
