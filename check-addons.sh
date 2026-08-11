@@ -181,13 +181,13 @@ check_recent_scheduled_run() {
   
   for repo in "${unique_repos[@]}"; do
     repo_url="https://github.com/$repo"
-    workflows_url="$repo_url/actions/workflows"
+    actions_url="$repo_url/actions"
     # Fetch only the most recent scheduled workflow run
     response=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/$repo/actions/runs?event=schedule&per_page=1")
 
     # Check if any runs are returned
     if [ "$(echo "$response" | jq -r '.workflow_runs | length')" -eq 0 ]; then
-      echo "ERROR: No scheduled runs found for $repo. Check workflows at $workflows_url"
+      echo "ERROR: No scheduled runs found for $repo. Check workflows at $actions_url"
       EXIT_CODE=3
       continue # Skip to the next repository
     fi
@@ -202,7 +202,7 @@ check_recent_scheduled_run() {
 
     # Check if the run date is within the last day
     if [[ "${run_date_seconds}" -le "$one_day_ago" ]]; then
-      echo "ERROR: The most recent scheduled run for $repo was not within the last day. Latest run: $run_url (workflow list: $workflows_url)"
+      echo "ERROR: The most recent scheduled run for $repo was not within the last day. Latest run: $run_url (workflow list: $actions_url)"
         EXIT_CODE=2
     fi
 
