@@ -146,17 +146,17 @@ check_recent_scheduled_run() {
   while IFS= read -r repo; do
     [[ -n "$repo" ]] && topic_repos+=("$repo")
   done < <(fetch_repos_with_topic)
-  
+
   # Start with hardcoded repos, then add CLI-provided repos
   all_repos=("${topic_repos[@]}" "${additional_repos[@]}")
-  
+
   # Add CLI-provided repos if available
   cli_repos=()
   if [[ -n "$additional_github_repos" ]]; then
     IFS=',' read -ra cli_repos <<< "$additional_github_repos"
     all_repos=("${all_repos[@]}" "${cli_repos[@]}")
   fi
-  
+
   # Remove duplicates using a simpler approach compatible with older bash
   unique_repos=()
   for repo in "${all_repos[@]}"; do
@@ -174,19 +174,43 @@ check_recent_scheduled_run() {
       unique_repos+=("$repo")
     fi
   done
-  
+
   # Calculate total additional repos (hardcoded + CLI)
   total_additional=$((${#additional_repos[@]} + ${#cli_repos[@]}))
   echo "Checking ${#unique_repos[@]} total repositories (${#topic_repos[@]} from topic '${topic}', ${total_additional} additional)"
-  
+
   for repo in "${unique_repos[@]}"; do
     repo_url="https://github.com/$repo"
     actions_url="$repo_url/actions"
-    # Fetch only the most recent scheduled workflow run
-    response=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/$repo/actions/runs?event=schedule&per_page=1")
+    # Fetch the most recent scheduled workflow run. GitHub's `event=schedule`
+    # filter sometimes answers with a run that is days or weeks old, so if that
+    # happens, ask again without the filter, which is reliable but only reaches
+    # back 100 runs. The runs are sorted here because the newest one is not
+    # always first.
+    local run_date="" run_date_seconds=0 candidate candidate_date candidate_seconds
+    for url in \
+      "https://api.github.com/repos/$repo/actions/runs?event=schedule&per_page=30" \
+      "https://api.github.com/repos/$repo/actions/runs?per_page=100"; do
+
+      candidate=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "$url" |
+        jq '{workflow_runs: [.workflow_runs[]? | select(.event == "schedule")] | sort_by(.created_at) | reverse}')
+      candidate_date=$(echo "$candidate" | jq -r '.workflow_runs[0].updated_at // empty')
+      [[ -z "$candidate_date" ]] && continue
+
+      candidate_seconds=$(${DATE} -d "$candidate_date" +%s)
+      # Keep whichever query found the newer run
+      if [[ "$candidate_seconds" -gt "$run_date_seconds" ]]; then
+        response="$candidate"
+        run_date="$candidate_date"
+        run_date_seconds="$candidate_seconds"
+      fi
+
+      # A recent run is trustworthy, so the second query is not needed
+      if [[ "$run_date_seconds" -gt "$one_day_ago" ]]; then break; fi
+    done
 
     # Check if any runs are returned
-    if [ "$(echo "$response" | jq -r '.workflow_runs | length')" -eq 0 ]; then
+    if [[ "$run_date_seconds" -eq 0 ]]; then
       echo "ERROR: No scheduled runs found for $repo. Check workflows at $actions_url"
       EXIT_CODE=3
       continue # Skip to the next repository
@@ -194,11 +218,8 @@ check_recent_scheduled_run() {
 
     # Extract the conclusion of the most recent scheduled run
     status=$(echo "$response" | jq -r '.workflow_runs[0] | select(.conclusion != null) | .conclusion')
-    timestamp=$(echo $response | jq -r '.workflow_runs[0].updated_at')
+    timestamp="$run_date"
     run_url=$(echo "$response" | jq -r '.workflow_runs[0].html_url')
-
-    local run_date=$(echo "$response" | jq -r '.workflow_runs[0].updated_at')
-    local run_date_seconds=$(${DATE} -d "$run_date" +%s)  # Convert run date to seconds since the Unix epoch
 
     # Check if the run date is within the last day
     if [[ "${run_date_seconds}" -le "$one_day_ago" ]]; then
