@@ -5,10 +5,12 @@ This repository provides scripts for monitoring DDEV add-ons and their test work
 
 - `check-addons.sh` - Monitors scheduled GitHub Actions workflows
 - `notify-addon-owners.sh` - Notifies owners about disabled test workflows
+- `run-addon-tests.sh` - Runs every add-on's tests on demand
+- `run-addon-tests-check.sh` - Waits for those runs and reports which ones failed
 
 ## What it monitors
 
-Both scripts monitor the same set of repositories:
+`check-addons.sh` and `notify-addon-owners.sh` monitor the same set of repositories:
 
 - **Topic-based repositories**: All repositories with the `ddev-get` topic
 - **Critical DDEV infrastructure**: Key repositories like `ddev/ddev`, `ddev/github-action-add-on-test`, etc.
@@ -196,3 +198,53 @@ The script requires a GitHub personal access token with the following permission
 - **read:org**: Read organization information (when using organization filters)
 
 For creating issues, the token must have write permissions for the target repositories.
+
+## run-addon-tests.sh and run-addon-tests-check.sh
+
+These two exist to confirm that the add-on tests pass against the current DDEV HEAD.
+You don't normally need to run them by hand, since the add-on tests already run on a
+daily schedule, but when you're about to make a release you usually want to make sure
+that the latest DDEV HEAD is good.
+
+`run-addon-tests.sh` dispatches the `tests` workflow on the default branch of every
+`ddev` org repository with the `ddev-get` topic, then writes one `repo run_id` line per
+dispatch to `$HOME/tmp/addon-test-runs.txt`. Each add-on's `tests.yml` runs a
+`[stable, HEAD]` matrix, so a dispatch covers HEAD alongside the released version.
+
+`run-addon-tests-check.sh` reads that file and waits for every run to complete, naming
+the repositories it's still waiting on, and then reports each conclusion with a link to
+the run.
+
+Both use whatever login the `gh` CLI has, and `GH_TOKEN` overrides it. Dispatching a
+workflow is a write operation, so unlike the other scripts here these need a token with
+`workflow` (Classic PAT) or Actions write (fine-grained PAT) access.
+
+### Usage
+
+```bash
+./run-addon-tests.sh
+./run-addon-tests-check.sh
+```
+
+Keep the run IDs somewhere else, for instance to leave an earlier batch untouched:
+
+```bash
+./run-addon-tests.sh ~/tmp/pre-release-runs.txt
+./run-addon-tests-check.sh ~/tmp/pre-release-runs.txt
+```
+
+Use a token other than the `gh` login's:
+
+```bash
+GH_TOKEN="$(gh auth token)" ./run-addon-tests.sh
+```
+
+### Exit codes
+
+- `0` - Every workflow was dispatched, and every run succeeded
+- `1` - A dispatch failed, or a run did not succeed
+- `4` - The run IDs file is missing or empty, so there is nothing to wait for
+
+Each add-on's `tests.yml` sets `cancel-in-progress` for the same ref, so a dispatch
+cancels an in-flight scheduled run in that repository, and dispatching twice in a row
+cancels the first batch.
